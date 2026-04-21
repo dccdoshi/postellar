@@ -16,11 +16,11 @@ class Observations():
     '''
 
     def __init__(self, i: int = 5, N: int = 10, kamp:float = 10, SNR = 100,seed:int = 5,inst_res:int = 70_000,order=20,
-                filepath: str = '../data/SPIRou20_intrinsic_broadened_over3_val.df',wfile="../data/SPIRou_wavelength_solution.fits") -> None:
+                filepath: str = '../data/SPIRou20_val.df',wfile="../data/SPIRou_wavelength_solution.fits") -> None:
         '''
         This defines the true stellar spectrum that will be used to create your synthetic observations. Our test data
-        is the dataframe saved from a py file in create spectra. The shape is [L] where L is the length of the spectrum.
-        Wgrid has a padded length, we will remove the padding to make sure it is length [L]. 
+        is the dataframe saved from a py file in create spectra. The shape is [D] where D is the length of the spectrum.
+        Wgrid has a padded length, we will remove the padding to make sure it is length D. 
 
         INPUTS:
         i = indicate which sample you want to use from your test data
@@ -29,10 +29,9 @@ class Observations():
         SNR = snr of observations
         seed = seed for noise 
         inst_res = broadening factor
-        filepath = filepath to your test data
-
-        OUTPUTS:
-        obs = the observations of shape [N,L]
+        order = order that you are using
+        filepath = filepath to your validation data
+        wfile = the wavelength solution file
         '''
         self.N = N
         self.kamp = kamp
@@ -48,6 +47,8 @@ class Observations():
         # This is the spectrum straight from PHOENIX now in shape [1,1,L]
         self.original_spectrum = torch.tensor(data['Spectrum'].iloc[i],dtype=torch.float64).to(DEVICE).view(1, 1, -1)
 
+
+
         # This is the wgrid but it is padded at the ends, the final wgrid we want should be without the padding
         # In shape [L]
         self.wgrid = torch.tensor(data['Wavelength'].iloc[i],dtype=torch.float64).to(DEVICE)
@@ -55,14 +56,26 @@ class Observations():
         self.padded_wgrid = self.wgrid.clone().detach().to(DEVICE)
         self.wgrid = self.wgrid[non_ones[0] : non_ones[-1] + 1]
 
-        # Degrade to instrument resolution
+
+
+
+        # Get the wavelength grid for the observations
         e = fits.open(wfile)
         wgrid =  np.sort(e[1].data[self.order]) 
         self.inst_wgrid = torch.tensor(np.ascontiguousarray(wgrid.byteswap().newbyteorder()),dtype=torch.float64).to(DEVICE)
 
+        # Just making sure that our observation wgrid matches our intrinsic wgrid
+        # Get the min and max bounds from a
+        lower = self.wgrid[0]
+        upper = self.wgrid[-1]
 
+        # Select only the part of b within [lower, upper]
+        self.inst_wgrid = self.inst_wgrid[(self.inst_wgrid >= lower) & (self.inst_wgrid <= upper)]
+
+
+
+        # This is what the training sample would have looked like (includes instrumental broadening)
         self.training = torch.tensor(data['Final'].iloc[i],dtype=torch.float64).to(DEVICE).view(1, 1, -1)#[non_ones[0] : non_ones[-1] + 1].view(1, 1, -1)
-
 
         # This is the normalization factor applied to create the training sample
         self.normalization_factor = torch.tensor(data['Normalization_Factor'].iloc[i],dtype=torch.float64).to(DEVICE)
@@ -72,7 +85,7 @@ class Observations():
         pass
         
 
-    def make_observations(self,func,filepath='../data/SPIRou_wavelength_solution.fits', add_RV= True, change_res=True):
+    def make_observations(self,func, add_RV= True):
         '''
         This function makes the synthetic observations using a normalized PHOENIX spectrum. 
         It will shift the observations according to an RV curve, broaden it, degrade to instrument sampling resolution, 
@@ -80,10 +93,9 @@ class Observations():
 
         INPUTS:
         func = the interpolation function used when creating the observations
-        filepath = the filepath for the detector sampling 
 
         OUTPUTS:
-        observations: observations of size [N,L] where N is number of observations and L is length of spectrum (unpadded)
+        observations: observations of size [N,L] where N is number of observations and L is length of 
         '''
 
         dates = self.define_dates()
@@ -99,10 +111,11 @@ class Observations():
         # Flux normalization
         self.right_flux = self.SNR**2*(self.original_spectrum.clone().detach()/self.normalization_factor )
 
-        # Shift the spectrum 
+        # Shift the spectrum with injected RV signal
         RV = RV.unsqueeze(0)
         spec_wgrid_batched = self.wgrid.view(1, 1, len(self.wgrid)).expand(1, self.N,len(self.wgrid))
         self.shifted_observations = shift_spectrum(self.right_flux , RV,spec_wgrid_batched,func)
+
         # Broaden the normalized spectrum 
         # This code is written in numpy so send tensors to numpy and then bring back to torch 
         self.broadened_observations = torch.zeros(self.shifted_observations.shape,dtype=torch.float64).to(DEVICE)
@@ -110,32 +123,15 @@ class Observations():
             self.broadened_observations[0,i] = torch.tensor(gauss_convolve(self.wgrid.cpu().numpy().astype(np.float64),self.shifted_observations[0,i].cpu().numpy().astype(np.float64),self.inst_res, 
                                                 n_fwhm=7, res_rtol=1e-6, mode='same', i_plot=True)[1],dtype=torch.float64).to(DEVICE)
 
-        if change_res:
-            # Degrade to instrument resolution
-            e = fits.open(filepath)
-            wgrid =  np.sort(e[1].data[self.order]) 
-            self.inst_wgrid = torch.tensor(np.ascontiguousarray(wgrid.byteswap().newbyteorder()),dtype=torch.float64).to(DEVICE)
 
-            # Get the min and max bounds from a
-            lower = self.wgrid[0]
-            upper = self.wgrid[-1]
+        # Place into sampling resolution of instrument
+        spec_wgrid_batched = self.wgrid.view(1, 1, len(self.wgrid)).expand(1, len(RV), len(self.wgrid)).to(DEVICE)
+        inst_wgrid_batched = self.inst_wgrid.view(1, 1, len(self.inst_wgrid)).expand(1, len(RV), len(self.inst_wgrid)).to(DEVICE)
+        self.degraded_observations = interpolate(spec_wgrid_batched,self.broadened_observations,inst_wgrid_batched,func)
 
-            # Select only the part of b within [lower, upper]
-            self.inst_wgrid = self.inst_wgrid[(self.inst_wgrid >= lower) & (self.inst_wgrid <= upper)]
-
-            spec_wgrid_batched = self.wgrid.view(1, 1, len(self.wgrid)).expand(1, len(RV), len(self.wgrid)).to(DEVICE)
-            inst_wgrid_batched = self.inst_wgrid.view(1, 1, len(self.inst_wgrid)).expand(1, len(RV), len(self.inst_wgrid)).to(DEVICE)
-            self.degraded_observations = interpolate(spec_wgrid_batched,self.broadened_observations,inst_wgrid_batched,func)
-
-            # Place in SNR and add photon noise
-            self.noisy_observations = self.degraded_observations.clone().detach() 
-        else:
-            self.inst_wgrid = torch.tensor(np.ascontiguousarray(wgrid.byteswap().newbyteorder()),dtype=torch.float64).to(DEVICE)
-
-            self.noisy_observations = self.broadened_observations.clone().detach()
-
+        # Place in SNR and add photon noise
+        self.noisy_observations = self.degraded_observations.clone().detach() 
         sig = torch.sqrt(torch.abs(self.noisy_observations))
-
         if self.seed is not None:
             torch.manual_seed(self.seed)
         noise = sig*torch.normal(0,1,size=self.noisy_observations.size(),dtype=torch.float64).to(DEVICE)
@@ -144,20 +140,14 @@ class Observations():
 
         self.final_observations = self.noisy_observations
         self.uncertainty = torch.sqrt(torch.abs(self.noisy_observations))
-
-        # For memory purposes
-        # self.shifted_observations = None
-        # self.broadened_observations = None
-        # self.degraded_observations = None
-        # batched_instwgrid = None
-        # batched_wgrid = None
-        # self.noisy_observations = None
-        # envelope = None
-        # degrade_envelope = None 
         
         return self.final_observations, self.uncertainty
 
     def post_process(self):
+        '''
+        We need normalized data to put through the spectrum sampler. Here we will just divide our observations by what their median
+        flux values should be (S/N ^2). The uncertainties should also be propogated accordingly.
+        '''
         self.normalized_observations = self.final_observations/(self.SNR**2)
         self.normalized_uncertainty = self.uncertainty / (self.SNR**2)
         return self.normalized_observations, self.normalized_uncertainty

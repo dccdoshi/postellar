@@ -7,7 +7,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 import time
 from types import SimpleNamespace
 def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgrid, inst_wgrid, non_ones,SNR, beta_min: float,
-                    beta_max: float,AtA: torch.Tensor,change_res=True):
+                    beta_max: float,AtA: torch.Tensor):
     '''
     This is the score likelihood function class. It's inputs are the set of observations and parameters
     that will be used to define the likelihood score. This is function used to compute the posterior sample
@@ -28,16 +28,12 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgr
     beta_max: the beta_max used to train the model
 
     AAT: the A matrix to trasnform the uncertainty in diffusion model through the transformation of the sample
-    change_res: a boolean to know if we have to transform the sample
-
 
     OUTPUTS:
     score_llk: This returns the function that score_models can use to do posterior sampling
     '''
 
     def find_sigma_t(t):
-        # log_coeff = 0.5 * (beta_max - beta_min) * t**2 + beta_min * t # integral of b(t)
-        # std = torch.sqrt(1. - torch.exp(- log_coeff))
         
         beta_primitive = 0.5 * (beta_max - beta_min) * t**2 + beta_min * t
         mu = torch.exp(-0.5 * beta_primitive)
@@ -47,7 +43,9 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgr
 
 
     def find_Sigma(sigma_t,mu,B,N,L,D):
-
+        '''
+        Calcuates the uncertainty matrix used for likelihood calculation
+        '''
         ## FASTER VERSION
         # Precompute A A^T once (independent of batch!)
         # shape [N, L, L]
@@ -64,19 +62,23 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgr
 
     def cholesky_fast(y, mu, x, sig):
         """
+        This calculates the likelihood in an efficient way when we have large matrices to invert
         y: [1, N, L]
         x: [B, N, L]
         sig: [B, N, L, L]
         """
     
         B, N, L_full = x.shape
+
+        # We will clip the ends because these get messed up from interpolation errors
         start = int(0.005 * L_full)
         end = int(0.995 * L_full)
         
         x_clip = x[:, :, start:end]                 # [B, N, L]
         y_clip = y[:, :, start:end] * mu[:, None, None]  # Broadcast instead of repeat
         sig_clip = sig[:, :, start:end, start:end]  # [B, N, L, L]
-    
+
+        # Calculate the residual between data and forward model 
         resid = y_clip - x_clip                     # [B, N, L]
         resid = resid.unsqueeze(-1)                 # [B, N, L, 1]
     
@@ -100,6 +102,9 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgr
 
     def likelihood_fn(t,x):
         '''
+        This calculates the likelihood using the convolved likelihood approximation of our spectrum sample
+        with respect to our observations
+
         t is in shape [B] where B is num samples
         x is in shape [B,1,D] where B is num of samples and D is length of spectrum (upsampled)
         '''
@@ -112,12 +117,12 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgr
         L = Y.shape[-1]
         N = Y.shape[1]
 
-        # Calculate the sigmas
+        # Calculate the sigmas - this is to calculate the uncertainty matrix in our llk calculation
         sigma_t, mu = find_sigma_t(t) # output is [B]
         Sigma = find_Sigma(sigma_t,mu, B,N,L,D) # output is [B,N,L,L]
 
         #### Transform the diffusion model output ####
-        transformed_X = forward_model(x_unpad,spec_wgrid,inst_wgrid,berv,V,change_res)
+        transformed_X = forward_model(x_unpad,spec_wgrid,inst_wgrid,berv,V)
 
         # Calculate likelihood with transformed x
         llk = cholesky_fast(Y,mu,transformed_X,Sigma)
@@ -125,6 +130,11 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgr
         return llk.sum()
 
     def score_llk(t, x):
+        '''
+        This function recieves t, x and outputs the score of the likelihood function with respect to x
+        t = noise parameter (time)
+        x = spectrum sample (batched)
+        '''
         score = grad(likelihood_fn,argnums=1)(t,x)
         return score
         

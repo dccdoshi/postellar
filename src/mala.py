@@ -20,7 +20,10 @@ class MALA():
         INTPUTS:
         obs = This is the observations used for sampling
         sig_n = This is the std of the gaussian noise estimated for the observations
-        transform = This is the function used to transform the velocities
+        berv = the bervs of your observation
+        snr = the snr of your observations
+        inst_wgrid = instruments/observations wavelength grid
+        spec_wgrid = wavelength grid of spectrum parameter
 
         '''
         DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -37,13 +40,6 @@ class MALA():
 
         # Define the unpadded regions of the spectrum 
         self.non_ones = torch.where(self.spec_wgrid != 1)[0]
-        # self.spec_wgrid = self.spec_wgrid[self.non_ones[0] : self.non_ones[-1] + 1]
-
-        # Reshape the wavlenegth grids to fit the interpolating function
-        # self.inst_wgrid = self.inst_wgrid #.unsqueeze(0).repeat(obs.shape[0],1).to(DEVICE)
-
-
-
         pass
 
     def find_rv(self,x_init:torch.Tensor,S:torch.Tensor,steps:int):
@@ -53,7 +49,6 @@ class MALA():
         INPUTS:
         x_init: current sample (this is the starting point RV which will be given by the template RVs)
         S: is the sampled spectrum
-        chain: how many chains of sampling do you want
         steps: how many steps do you want to compute for the sampling 
 
 
@@ -62,11 +57,11 @@ class MALA():
         accepted: the final tensor for which samples had accepted new steps
         '''
         # Define stepsize based on the bouchy limit uncertainty
+
+        # Calculate bouchy uncertainty
         # Convert to specific SNR (taken from ENIRIC package) --> this makes it unitless
         A_0 = self.snr**2*self.obs[0,0].cpu().numpy()
-   
         A_0 = A_0[self.start:self.end]#.numpy()
-
         Lambda = self.inst_wgrid.cpu().numpy()[self.start:self.end]
 
         # Compute the uncertainty
@@ -76,13 +71,16 @@ class MALA():
         Ne = np.sum(A_0)
 
         self.deltaV = c/(Q*np.sqrt(Ne))
+
+        step_size = self.deltaV * (700 / self.snr)
+
         
+        # Parameters to implement adaptive stepsize
         target_accept_min = 0.30
         target_accept_max = 0.40
         adapt_rate = 0.2   # how aggressively to adjust step size
         adapt_window = 25  # how often to update (in steps)
         
-        step_size = self.deltaV * (700 / self.snr)
         
         samples = torch.zeros((steps + 1, x_init.shape[0], x_init.shape[1]), dtype=torch.float64, device=DEVICE)
         accepted = torch.zeros((steps + 1, x_init.shape[0], x_init.shape[1]), dtype=torch.float64, device=DEVICE)
@@ -91,6 +89,7 @@ class MALA():
         with torch.no_grad():
             sample = x_init.clone().to(DEVICE)
             for j in range(1, steps + 1):
+                # New step in markov chain using langevin dynamics
                 sample, accept = self.mala_step(sample, S, step_size)
                 accepted[j] = accept
                 samples[j] = sample
@@ -135,7 +134,7 @@ class MALA():
             log_prob_fn =  lambda x: self.log_prob_gaussian(x, S, self.covariance)
 
 
-        ## HAVE TO CONSIDER THE PROBABILITY OF THE LANGEVIN STEP? ##
+        ## HAVE TO CONSIDER THE PROBABILITY OF THE LANGEVIN STEP to maintain detailed balance ##
         def q(xp, x, score_x):
             if precond_matrix is not None:
                 precond_matrix_squared = precond_matrix @ precond_matrix.T
@@ -149,6 +148,7 @@ class MALA():
 
 
         # Calculate Langevin step #####
+
         # First determine the score of the current sample
         score = score_fn(x)
         if precond_matrix is not None:
@@ -158,6 +158,7 @@ class MALA():
         else:
             # The step is determined by the stepsize, score, and some randomness (langevin)
             dx = step_size * score + torch.sqrt(2*step_size) * torch.randn_like(x)
+
         # Proposed langevin step
         x_new = x + dx
         
@@ -194,7 +195,7 @@ class MALA():
         # You have to shift the sampled spectrum by the new sampled V 
 
 
-        sampled_obs = forward_model(S,self.spec_wgrid,self.inst_wgrid,self.berv,x,change_res=True)
+        sampled_obs = forward_model(S,self.spec_wgrid,self.inst_wgrid,self.berv,x)
 
         # Compare this with the observations
         norm = dist.Normal(self.obs[:,:,self.start:self.end], cov[:,:,self.start:self.end])
@@ -208,7 +209,7 @@ class MALA():
         # Log-probability for a Gaussian
         # You have to shift the sampled spectrum by the new sampled V
 
-        sampled_obs = forward_model(S,self.spec_wgrid,self.inst_wgrid,self.berv,x,change_res=True)
+        sampled_obs = forward_model(S,self.spec_wgrid,self.inst_wgrid,self.berv,x)
 
 
         # Compare this with the observations

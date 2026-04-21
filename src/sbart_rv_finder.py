@@ -42,13 +42,14 @@ class RV_Retrieval():
         if rv.ndim==0:
             rv = torch.tensor([rv]).to(DEVICE)
         if self.type=='template':
-
+            # If we are using this RV analysis technique with a template
             shifted = shift_spectrum(self.model.view(1, 1, -1),rv.unsqueeze(0),self.upsampled_wgrid.unsqueeze(0).unsqueeze(0),func)
             batched_wgrid = self.upsampled_wgrid.unsqueeze(0).unsqueeze(0)#.repeat(self.broadened_observations.shape[0],1).to(DEVICE)
             batched_instwgrid = self.instrument_wgrid.unsqueeze(0).unsqueeze(0)
             shifted_degraded_template = interpolate(batched_wgrid,shifted,batched_instwgrid,func)
 
         elif self.type=='intrinsic':
+            # If we are using this RV analysis technique with the real intrinsic spectrum
             envelope = torch.quantile(self.model,q=0.5).to(DEVICE)
             right_flux = self.SNR**2*self.model.clone().detach()/envelope
             shifted = shift_spectrum(right_flux.view(1, 1, -1),rv.unsqueeze(0),self.upsampled_wgrid.unsqueeze(0).unsqueeze(0),func)
@@ -61,6 +62,7 @@ class RV_Retrieval():
 
         
         elif self.type=="sample":
+            # If we are using this RV analysis technique with a posterior sample
             right_flux = self.model
             shifted = shift_spectrum(right_flux.view(1, 1, -1),rv.unsqueeze(0),self.upsampled_wgrid.unsqueeze(0).unsqueeze(0),func)
             batched_wgrid = self.upsampled_wgrid.unsqueeze(0).unsqueeze(0)#.repeat(self.broadened_observations.shape[0],1).to(DEVICE)
@@ -85,17 +87,19 @@ class RV_Retrieval():
         '''
         # if isinstance(v, (float, int)):
         #     v = np.array([v])
+
         # Calculate the shifted model
         model_y = self.new_model(v,berv,func)[0]
 
         # Only consider the middle portions as the ends may be affected by bad interpolation
+        # Will not use ends of spectrum as they will be affected by convolution 
         start = int(len(data)*0.005)
         end = int(len(data)*0.995)
 
 
         # Determine the uncertainty
         sig  = sig**2 # Uncertainty of observation
-        # Will not use ends of spectrum as they will be affected by convolution 
+      
         # This is taken as Equation 2 from (Silva et al. 2022)
         residual = ((data[start:end]-model_y[:,start:end]))**2/sig[start:end]
         chi2 = torch.sum(residual,axis=1)
@@ -118,9 +122,11 @@ class RV_Retrieval():
         # data = data.cpu().numpy().astype(np.float64)
         # sig = sig.cpu().numpy().astype(np.float64)
 
-
+        # Initialize how we will store the RVs and uncertainties
         rv_order = np.zeros_like(berv)
         unc_dv = np.zeros_like(berv)
+
+        # Go through each observation and find the best-fit RV
         for i in range(len(berv)):
 
             result = minimize_scalar(self.chi2,args=(data[0,i],sig[0,i],berv[i],func),method='brent')

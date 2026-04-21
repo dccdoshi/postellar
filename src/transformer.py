@@ -7,17 +7,39 @@ import numpy as np
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.set_default_dtype(torch.float64) 
 import time
-def forward_model(x_unpad,spec_wgrid_trimmed,inst_wgrid,berv,V,change_res=True):
+def forward_model(x_unpad,spec_wgrid_trimmed,inst_wgrid,berv,V):
+    '''
+    This defines the forward model so how we transform our spectrum parameter into our our spectra that resemble our observations.
+
+    x_unpad is the spectrum samples without their padding 
+    spec_wgrid_trimmed is the native wavelength grid of the spectrum parameter without the padding
+    inst_wgrid is the wavelength grid of our observations (this is assumed to be the same across our observations)
+    berv is the berv value for each observation
+    V is the suggested RV value for each observation
+
+    so we go from [B,D] to [B,N,L] where
+    B = the batch size of spectrum samples
+    D = is the length of your spectrum parameter
+    N = the number of observations 
+    L = the length of your spectrum in observation space (instrument pixels)
+    '''
+    # This is the batch size, so the number of spectrum samples we need to transform
     B = len(x_unpad)
 
     # Shift and interpolate to match observations
-    if change_res:
-        spec_wgrid_batched = spec_wgrid_trimmed.view(1, 1, len(spec_wgrid_trimmed)).expand(B, len(V[0]),len(spec_wgrid_trimmed))
-        shifted_obs = shift_spectrum(x_unpad,berv+V,spec_wgrid_batched)
-        inst_wgrid_batched = inst_wgrid.view(1, 1, len(inst_wgrid)).expand(B, len(V[0]), len(inst_wgrid))
-        transformed_X = interpolate(spec_wgrid_batched,shifted_obs,inst_wgrid_batched)
-    else:
-        transformed_X = shift_spectrum(x_unpad,berv+V,spec_wgrid)
+    # First we need to batch the spectrum wavelength grid
+    spec_wgrid_batched = spec_wgrid_trimmed.view(1, 1, len(spec_wgrid_trimmed)).expand(B, len(V[0]),len(spec_wgrid_trimmed))
+
+    # Then we apply a doppler shift to our spectrum samples according to berv and V
+    # We get back the flux values with respect to the orginal spectrum wavelength grid
+    shifted_obs = shift_spectrum(x_unpad,berv+V,spec_wgrid_batched)
+
+    # Then we batch the observation wavelength grid
+    inst_wgrid_batched = inst_wgrid.view(1, 1, len(inst_wgrid)).expand(B, len(V[0]), len(inst_wgrid))
+
+    # Finally we interpolate our shifted spectra to our observations wavelength grid
+    transformed_X = interpolate(spec_wgrid_batched,shifted_obs,inst_wgrid_batched)
+
     return transformed_X
 
 def shift_spectrum(S: torch.Tensor, V: torch.Tensor, W: torch.Tensor,func='connors') -> torch.Tensor:
