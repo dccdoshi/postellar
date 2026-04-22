@@ -48,21 +48,9 @@ class RV_Retrieval():
             batched_instwgrid = self.instrument_wgrid.unsqueeze(0).unsqueeze(0)
             shifted_degraded_template = interpolate(batched_wgrid,shifted,batched_instwgrid,func)
 
-        elif self.type=='intrinsic':
-            # If we are using this RV analysis technique with the real intrinsic spectrum
-            envelope = torch.quantile(self.model,q=0.5).to(DEVICE)
-            right_flux = self.SNR**2*self.model.clone().detach()/envelope
-            shifted = shift_spectrum(right_flux.view(1, 1, -1),rv.unsqueeze(0),self.upsampled_wgrid.unsqueeze(0).unsqueeze(0),func)
-            broadened = torch.tensor(gauss_convolve(self.upsampled_wgrid.cpu().numpy().astype(np.float64),shifted[0,0].cpu().numpy().astype(np.float64),70_000, 
-                                                    n_fwhm=7, res_rtol=1e-6, mode='same', i_plot=True)[1],dtype=torch.float64).to(DEVICE)
-            
-            batched_wgrid = self.upsampled_wgrid.unsqueeze(0).unsqueeze(0)#.repeat(self.broadened_observations.shape[0],1).to(DEVICE)
-            batched_instwgrid = self.instrument_wgrid.unsqueeze(0).unsqueeze(0)
-            shifted_degraded_template = interpolate(batched_wgrid,broadened.unsqueeze(0).unsqueeze(0),batched_instwgrid,func)
-
         
         elif self.type=="sample":
-            # If we are using this RV analysis technique with a posterior sample
+            # If we are using this RV analysis technique with a posterior sample or intrinsic spectrum
             right_flux = self.model
             shifted = shift_spectrum(right_flux.view(1, 1, -1),rv.unsqueeze(0),self.upsampled_wgrid.unsqueeze(0).unsqueeze(0),func)
             batched_wgrid = self.upsampled_wgrid.unsqueeze(0).unsqueeze(0)#.repeat(self.broadened_observations.shape[0],1).to(DEVICE)
