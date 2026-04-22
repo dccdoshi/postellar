@@ -95,7 +95,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         # Create A-group in HDF5
         # This is simply done to save the key parameters from this test
         # -------------------
-        obs = Observations(i=0, seed=0, SNR=100, filepath="../data/"+val_data_file, N=5,order=args.order)
+        obs = Observations(i=0, seed=0, SNR=100, filepath="../data/validation_data/"+val_data_file, N=5,order=args.order)
         non_ones = torch.where(obs.padded_wgrid != 1)
         group_A = f_out.create_group("Order")
         group_A.attrs["order"] = args.order
@@ -109,7 +109,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         # -------------------
         # Create synthetic observations
         # -------------------
-        obs = Observations(i=i, seed=0, SNR=snr, filepath="../data/"+val_data_file, N=nspec,order=args.order)
+        obs = Observations(i=i, seed=0, SNR=snr, filepath="../data/validation_data/"+val_data_file, N=nspec,order=args.order)
         synthetic_spectra, uncertainty = obs.make_observations(func='connors', add_RV=True)
         synthetic_spectra, uncertainty = obs.post_process()
         non_ones = torch.where(obs.padded_wgrid != 1)
@@ -159,7 +159,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
 
         AtA = torch.cat(list_AtA)
         list_AtA = []
-         print("I have created the AtA matrix.",flush=True)
+        print("I have created the AtA matrix.",flush=True)
        
         # -------------------
         # Gibbs Sampling
@@ -193,9 +193,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         del AtA
         torch.cuda.empty_cache()
         spectrum_samples = torch.stack(spectrum_samples,dim=0)
-        print(spectrum_samples.shape)
         mean_spectrum_sample = spectrum_samples.mean(dim=(0),keepdim=True)[0]
-        print(mean_spectrum_sample.shape)
         print("I am done sampling for the spectrum.",flush=True)
 
         # -------------------
@@ -228,7 +226,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         for seed in range(num_seeds):
             print("At this seed"+str(seed),flush=True)
             # Create evaluation observations with new planet value
-            eval_obs = Observations(i=i, seed=seed, SNR=snr, filepath="../data/"+val_data_file, N=100,order=args.order)
+            eval_obs = Observations(i=i, seed=seed, SNR=snr, filepath="../data/validation_data/"+val_data_file, N=100,order=args.order)
             eval_spectra, eval_unc = eval_obs.make_observations(func='connors', add_RV=True)
             eval_spectra, eval_unc = eval_obs.post_process()
             
