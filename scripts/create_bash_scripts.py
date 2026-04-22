@@ -33,7 +33,7 @@ for folder in subfolders:
 #SBATCH --error={job_name}_%j.err
 
 
-source $HOME/envs/pRV/bin/activate
+source $HOME/pRV/bin/activate
 echo "Running job for {order}"
 python sampling_with_phoenix_model.py -i 0 -snr 10 25 50 75 -ntemp 10 -order {int(order)} -val "SPIRou{order}_val.df" -output "o{order}" -model "{folder_name}"
 """)

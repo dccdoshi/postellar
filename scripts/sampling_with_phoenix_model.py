@@ -57,7 +57,7 @@ bmax = 20
  Defaults you can change
 '''
 # How many noise instances do you want to test over when we test how well our spectrum is at retrieving RVs
-num_seeds = 10
+num_seeds = 5
 # How many posterior spectra do we want to sample?
 B = 5
 
@@ -84,7 +84,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         steps = 10_000
     elif snr>50:
         steps = 5_000
-    print(steps)
+    print("These are the number of Euler-Maryuma steps for the spectrum sampler: ",steps,flush=True)
 
 
     # unique file name for each parameter combo
@@ -113,12 +113,14 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         synthetic_spectra, uncertainty = obs.make_observations(func='connors', add_RV=True)
         synthetic_spectra, uncertainty = obs.post_process()
         non_ones = torch.where(obs.padded_wgrid != 1)
-        
+        print("I have created the synthetic observations.",flush=True)
+
         # -------------------
         # Create template
         # -------------------
         temp = Template(synthetic_spectra, obs.berv, obs.inst_wgrid, obs.wgrid)
         template = temp.make_template(func='scipy')
+        print("I have created the template.",flush=True)
         
         # -------------------
         # Find initial RVs using template-matching
@@ -157,7 +159,8 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
 
         AtA = torch.cat(list_AtA)
         list_AtA = []
-        
+         print("I have created the AtA matrix.",flush=True)
+       
         # -------------------
         # Gibbs Sampling
         # Here we sample for the spectrum first with our synthetic observations
@@ -166,6 +169,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         
         spectrum_samples = []
         for gibb in tqdm(range(gibbs_steps)):
+            print("I am starting to sample for the spectrum.",flush=True)
 
             # This defines the likelihood function that our posterior sampler will use to do posterior sampling
             LSF = Score_Likelihood(Y=synthetic_spectra, V=planetrv_for_spectrum_sample, sig_n=uncertainty,
@@ -192,6 +196,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         print(spectrum_samples.shape)
         mean_spectrum_sample = spectrum_samples.mean(dim=(0),keepdim=True)[0]
         print(mean_spectrum_sample.shape)
+        print("I am done sampling for the spectrum.",flush=True)
 
         # -------------------
         # Create B-group
@@ -217,6 +222,8 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         # Here we want to test our new spectrum in doing RV analysis. So we create a bunch of different observations with different noise instances 'seeds' 
         # and evaluate over these observations
         # -------------------
+        print("I am going to sample the RVs now.",flush=True)
+
         group_D = group_B.create_group("RV Samples")
         for seed in range(num_seeds):
             print("At this seed"+str(seed),flush=True)

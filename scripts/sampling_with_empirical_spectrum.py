@@ -51,7 +51,6 @@ output_file = args.output
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 val_data_file = args.val
 gibbs_steps = args.gibb
-checkpoints_directory = "../../order_model/"+args.model
 bmin= 1e-2
 bmax = 20
 
@@ -62,6 +61,9 @@ bmax = 20
 num_seeds = 10
 # How many posterior spectra do we want to sample?
 B = 5
+# Path to your order_model directory
+checkpoints_directory = "../../order_model/"+args.model
+
 
 # -------------------
 # Load model once
@@ -86,7 +88,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         steps = 10_000
     elif snr>50:
         steps = 5_000
-    print(steps)
+    print("These are the number of Euler-Maryuma steps for the spectrum sampler: ",steps,flush=True)
 
     # unique file name for each parameter combo
     filename = f"results/{output_file}_i{i}_snr{snr}_nspec{nspec}.h5"
@@ -114,12 +116,14 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         synthetic_spectra, uncertainty = obs.make_observations(func='connors', add_RV=True)
         synthetic_spectra, uncertainty = obs.post_process()
         non_ones = torch.where(obs.padded_wgrid != 1)
+        print("I have created the synthetic observations.",flush=True)
         
         # -------------------
         # Create template
         # -------------------
         temp = Template(synthetic_spectra, obs.berv, obs.inst_wgrid, obs.wgrid)
         template = temp.make_template(func='scipy')
+        print("I have created the template.",flush=True)
         
         # -------------------
         # Find initial RVs using template-matching
@@ -130,7 +134,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         # -------------------
         # Restructure the retrieved RVs to fit the tensor shapes needed for later analysis
         # -------------------
-        bervs_to_send = obs.berv.unsqueeze(0).expand(B, nspec)
+        bervs_for_sampling = obs.berv.unsqueeze(0).expand(B, nspec)
         planetrv_for_spectrum_sample = torch.tensor(templatervs_init).to(device).unsqueeze(0).expand(B, nspec)
         
         # -------------------
@@ -147,7 +151,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
             def f_wrapped(x):
                 return forward_model(x, obs.wgrid, obs.inst_wgrid, berv_for_A, planetrv_for_A)
 
-            x = obs.training[:, :, non_ones[0]]
+            x = obs.original_spectrum
             A_full = jacobian(f_wrapped, x, create_graph=False)
             A = A_full[0, :, :, 0, 0, :]                 # [chunk, L, L]
             chunk_AtA = torch.matmul(A, A.transpose(-1, -2))   # [chunk, L, L]
@@ -158,7 +162,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
 
         AtA = torch.cat(list_AtA)
         list_AtA = []
-        
+        print("I have created the AtA matrix.",flush=True)
         # -------------------
         # Gibbs Sampling
         # Here we sample for the spectrum first with our synthetic observations
@@ -167,6 +171,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         
         spectrum_samples = []
         for gibb in tqdm(range(gibbs_steps)):
+            print("I am starting to sample for the spectrum.",flush=True)
              # This defines the likelihood function that our posterior sampler will use to do posterior sampling
             LSF = Score_Likelihood(Y=synthetic_spectra, V=planetrv_for_spectrum_sample, sig_n=uncertainty,
                                     spec_wgrid=obs.wgrid, inst_wgrid=obs.inst_wgrid, non_ones=non_ones[0], SNR=snr,
@@ -189,6 +194,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         torch.cuda.empty_cache()
         spectrum_samples = torch.stack(spectrum_samples,dim=0)
         mean_spectrum_sample = spectrum_samples.mean(dim=(0),keepdim=True)[0]
+        print("I am done sampling for the spectrum.",flush=True)
         # -------------------
         # Create B-group
         # Saving the parameter combo values here. 
@@ -212,6 +218,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         # Create D-group (per seed × true planet value)
         # -------------------
         group_D = group_B.create_group("RV Samples")
+        print("I am going to sample the RVs now.",flush=True)
         for seed in range(num_seeds):
             print("At this seed"+str(seed),flush=True)
             # Create evaluation obs with new planet value
