@@ -82,12 +82,6 @@ def interpolate(x,y,xs,func='connors'):
         # compatible making it very fast
         # Use the batched version of connor's code 
         ys = connors(x,y,xs)
-    elif func=='torch_cubic_spline':
-        # This is the most accurate as it computes second derivatives but
-        # involves a for loop and not batchwise compatible therefore very slow
-        # However it is torch compatible
-        # Use the torch cubic spline (not batched)
-        ys = torch_cubic_spline(x,y,xs)
 
     return ys 
 
