@@ -15,7 +15,7 @@ class Observations():
     Here is the code used to make synthetic observations from our validation dataset
     '''
 
-    def __init__(self, i: int = 5, N: int = 10, kamp:float = 10, SNR = 100,seed:int = 5,inst_res:int = 70_000,order=20,
+    def __init__(self, i: int = 5, N: int = 10, kamp:float = 0, SNR = 100,seed:int = 5,inst_res:int = 70_000,order=20,
                 filepath: str = '../data/SPIRou20_val.df',wfile="../data/SPIRou_wavelength_solution.fits") -> None:
         '''
         This defines the true stellar spectrum that will be used to create your synthetic observations. Our test data
@@ -213,7 +213,7 @@ class Observations():
         # Add Planet (just a simple sin curve)
         A = planet_amp
         w=0.08
-        self.planet = (A*torch.sin(w*self.julian_dates)).to(DEVICE) * 0
+        self.planet = (A*torch.sin(w*self.julian_dates)).to(DEVICE)
 
         # Add it all together
         self.RV=self.planet+self.sys+self.berv
