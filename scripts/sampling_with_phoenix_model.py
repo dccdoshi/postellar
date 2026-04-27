@@ -132,6 +132,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         # Restructure the retrieved RVs to fit the tensor shapes needed for later analysis
         # -------------------
         bervs_for_sampling = obs.berv.unsqueeze(0).expand(B, nspec)
+        AtA_rvs = torch.tensor(templatervs_init).to(device)#.unsqueeze(0)
         planetrv_for_spectrum_sample = torch.tensor(templatervs_init).to(device).unsqueeze(0).expand(B, nspec)
         
         # -------------------
@@ -141,14 +142,14 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         # TLDR this captures the transformation matrix "A" for each observation (berv value) and saves them in a torch list
         # -------------------
         list_AtA = []
-        for planet_chunk, berv_chunk in zip(obs.planet, obs.berv):
+        for planet_chunk, berv_chunk in zip(AtA_rvs, obs.berv):
             planetrv_for_A = torch.as_tensor(planet_chunk, device=device).unsqueeze(0).unsqueeze(0)
             berv_for_A = berv_chunk.unsqueeze(0).unsqueeze(0)
 
             def f_wrapped(x):
                 return forward_model(x, obs.wgrid, obs.inst_wgrid, berv_for_A, planetrv_for_A)
 
-            x = obs.training[:, :, non_ones[0]]
+            x = torch.load("../data/AtA_spectrum.pt")
             A_full = jacobian(f_wrapped, x, create_graph=False)
             A = A_full[0, :, :, 0, 0, :]                 # [chunk, L, L]
             chunk_AtA = torch.matmul(A, A.transpose(-1, -2))   # [chunk, L, L]
@@ -168,6 +169,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         # -------------------
         
         spectrum_samples = []
+        gibb_rv_samples = []
         for gibb in tqdm(range(gibbs_steps)):
             print("I am starting to sample for the spectrum.",flush=True)
 
@@ -189,11 +191,13 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
             # Save the samples we generated. Take out the burn in phase for the RV samples
             planetrv_for_spectrum_sample = torch.mean(samples[500:], dim=0)
             spectrum_samples.append(posterior_samples)
+            gibb_rv_samples.append(samples[500:])
 
         del AtA
         torch.cuda.empty_cache()
         spectrum_samples = torch.stack(spectrum_samples,dim=0)
         mean_spectrum_sample = spectrum_samples.mean(dim=(0),keepdim=True)[0]
+        gibb_rv_torch = torch.stack(gibb_rv_samples,dim=0)
         print("I am done sampling for the spectrum.",flush=True)
 
         # -------------------
@@ -214,6 +218,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         group_C.create_dataset("posterior_spectrum_samples", data=spectrum_samples.cpu().numpy())
         group_C.create_dataset("template", data=template.cpu().numpy())
         group_C.create_dataset("true_spectrum", data=obs.training.cpu().numpy())
+        group_C.create_dataset("gibbs_rv", data=gibb_rv_torch.cpu().numpy())
         
         # -------------------
         # Create D-group (per seed × true planet value)
