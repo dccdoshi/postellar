@@ -135,6 +135,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         # Restructure the retrieved RVs to fit the tensor shapes needed for later analysis
         # -------------------
         bervs_for_sampling = obs.berv.unsqueeze(0).expand(B, nspec)
+        AtA_rvs = torch.tensor(templatervs_init).to(device)#.unsqueeze(0)
         planetrv_for_spectrum_sample = torch.tensor(templatervs_init).to(device).unsqueeze(0).expand(B, nspec)
         
         # -------------------
@@ -144,14 +145,14 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         # TLDR this captures the transformation matrix "A" for each observation (berv value) and saves them in a torch list
         # -------------------
         list_AtA = []
-        for planet_chunk, berv_chunk in zip(obs.planet, obs.berv):
+        for planet_chunk, berv_chunk in zip(AtA_rvs, obs.berv):
             planetrv_for_A = torch.as_tensor(planet_chunk, device=device).unsqueeze(0).unsqueeze(0)
             berv_for_A = berv_chunk.unsqueeze(0).unsqueeze(0)
 
             def f_wrapped(x):
                 return forward_model(x, obs.wgrid, obs.inst_wgrid, berv_for_A, planetrv_for_A)
 
-            x = obs.original_spectrum
+            x = torch.load("../data/AtA_spectrum.pt")
             A_full = jacobian(f_wrapped, x, create_graph=False)
             A = A_full[0, :, :, 0, 0, :]                 # [chunk, L, L]
             chunk_AtA = torch.matmul(A, A.transpose(-1, -2))   # [chunk, L, L]
