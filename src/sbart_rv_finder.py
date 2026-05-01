@@ -87,7 +87,8 @@ class RV_Retrieval():
 
         # Determine the uncertainty
         sig  = sig**2 # Uncertainty of observation
-      
+        if self.type=='template':
+            sig == (sig**2)*(1+1/self.Ntemp)
         # This is taken as Equation 2 from (Silva et al. 2022)
         residual = ((data[start:end]-model_y[:,start:end]))**2/sig[start:end]
         chi2 = torch.sum(residual,axis=1)
