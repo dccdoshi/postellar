@@ -25,10 +25,10 @@ parser.add_argument("-i", type=int, nargs="+", required=True, help="This provide
                                                                     open the dataframe, find the model with the parameters you want, use that specific index here")
 
 parser.add_argument("-snr", type=int, nargs="+", required=True, help="List of SNR values you wanted to test for")
-parser.add_argument("-ntemp", type=int, nargs="+", required=True, help="List of Ntemp values. Ntemp refers to how many observations do you want to use to inform your spectrum inference.")
+parser.add_argument("-ntemp", type=int, nargs="+", required=True, help="List of Ntemp values. Ntemp refers to the number of template observations you want to use to inform your spectrum inference.")
 parser.add_argument("-order",type=int, required=True,help="Order number: What order are we doing this analysis over")
-parser.add_argument('-val', type=str, default='SPIRou20_val.df', help='This should reference the validation file with the given order.')
-parser.add_argument('-model', type=str, default='b16nf16ch2_4_spir20_e500', help='This should reference the trained ML model with the given order')
+parser.add_argument('-val', type=str, default='SPIRou21_val.df', help='This should reference the validation file with the given order.')
+parser.add_argument('-model', type=str, default='b8nf16ch2_2_2_2_e750_o21 ', help='This should reference the trained ML model with the given order')
 parser.add_argument('-output', type=str, default='output.h5', help='HDF5 file to save outputs')
 parser.add_argument('-gibb', type=int, default=1, help='The number of gibbs steps. This should just be set to one.')
 parser.add_argument('-step', type=int, default=3000,nargs="+", help='The number of Euler-Maryuma steps for the spectrum sampling.')
@@ -48,7 +48,7 @@ output_file = args.output
 # -------------------
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 val_data_file = args.val
-gibbs_steps = args.gibb
+gibbs_steps = args.gibb  # number of Gibbs steps. Currently we are just using 1.
 checkpoints_directory = "../../order_model/"+args.model
 bmin= 1e-2
 bmax = 20
@@ -57,7 +57,7 @@ bmax = 20
  Defaults you can change
 '''
 # How many noise instances do you want to test over when we test how well our spectrum is at retrieving RVs
-num_seeds = 5
+num_seeds = 5  #noise we add to the observation
 # How many posterior spectra do we want to sample?
 B = 5
 
@@ -95,6 +95,7 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
         # Create A-group in HDF5
         # This is simply done to save the key parameters from this test
         # -------------------
+        
         obs = Observations(i=0, seed=0, SNR=100, filepath="../data/validation_data/"+val_data_file, N=5,order=args.order)
         non_ones = torch.where(obs.padded_wgrid != 1)
         group_A = f_out.create_group("Order")
@@ -149,7 +150,8 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
             def f_wrapped(x):
                 return forward_model(x, obs.wgrid, obs.inst_wgrid, berv_for_A, planetrv_for_A)
 
-            x = torch.load("../data/AtA_spectrum.pt")
+            x = torch.load(f"../data/AtA_spectra/AtA_spectrum_{args.order}.pt", map_location=device)
+
             A_full = jacobian(f_wrapped, x, create_graph=False)
             A = A_full[0, :, :, 0, 0, :]                 # [chunk, L, L]
             chunk_AtA = torch.matmul(A, A.transpose(-1, -2))   # [chunk, L, L]
