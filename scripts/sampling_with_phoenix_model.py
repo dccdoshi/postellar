@@ -25,10 +25,10 @@ parser.add_argument("-i", type=int, nargs="+", required=True, help="This provide
                                                                     open the dataframe, find the model with the parameters you want, use that specific index here")
 
 parser.add_argument("-snr", type=int, nargs="+", required=True, help="List of SNR values you wanted to test for")
-parser.add_argument("-ntemp", type=int, nargs="+", required=True, help="List of Ntemp values. Ntemp refers to the number of template observations you want to use to inform your spectrum inference.")
+parser.add_argument("-ntemp", type=int, nargs="+", required=True, help="List of Ntemp values. Ntemp refers to the number of synthetic observations you want to use to inform your spectrum inference.")
 parser.add_argument("-order",type=int, required=True,help="Order number: What order are we doing this analysis over")
-parser.add_argument('-val', type=str, default='SPIRou21_val.df', help='This should reference the validation file with the given order.')
-parser.add_argument('-model', type=str, default='b8nf16ch2_2_2_2_e750_o21 ', help='This should reference the trained ML model with the given order')
+parser.add_argument('-val', type=str, default='SPIRou20_val.df', help='This should reference the validation file with the given order.')
+parser.add_argument('-model', type=str, default='b8nf16ch2_2_2_2_e750_o20 ', help='This should reference the trained ML model with the given order')
 parser.add_argument('-output', type=str, default='output.h5', help='HDF5 file to save outputs')
 parser.add_argument('-gibb', type=int, default=1, help='The number of gibbs steps. This should just be set to one.')
 parser.add_argument('-step', type=int, default=3000,nargs="+", help='The number of Euler-Maryuma steps for the spectrum sampling.')
@@ -237,17 +237,18 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
             eval_spectra, eval_unc = eval_obs.make_observations(func='connors', add_RV=True)
             eval_spectra, eval_unc = eval_obs.post_process()
             
-            # Template RVs
+            # Template (that we have previously created) RVs
             sbart_eval = RV_Retrieval(snr, template, eval_obs.wgrid, eval_obs.inst_wgrid, nspec)
             temp_rv, temp_unc = sbart_eval.find_dv(eval_spectra.cpu(), eval_unc.cpu(), eval_obs.berv.cpu(), func='connors')
             print("Done template",flush=True)
 
-            # Intrinsic RVs
+            # Intrinsic RVs (ground truth) this is the grey histogram in the Z-score plot
             sbart_int = RV_Retrieval(snr, eval_obs.training[:, :, non_ones[0][0]:non_ones[0][-1]+1], eval_obs.wgrid, eval_obs.inst_wgrid, 0, type='sample')
             int_rv, int_unc = sbart_int.find_dv(eval_spectra.cpu(), eval_unc.cpu(), eval_obs.berv.cpu(), func='connors')
             print("Done int",flush=True)
 
-            # Use the mean spectrum sample with the SBART template matching technique
+            # Use the mean spectrum sample with the SBART template matching technique 
+            # the mean spectrum is created with the spectra from the ML
             sbart_prior = RV_Retrieval(snr, mean_spectrum_sample.mean(dim=(0),keepdim=True)[:, :, non_ones[0][0]:non_ones[0][-1]+1], eval_obs.wgrid, eval_obs.inst_wgrid, 0, type='sample')
             prior_rv, prior_unc = sbart_prior.find_dv(eval_spectra.cpu(), eval_unc.cpu(), eval_obs.berv.cpu(), func='connors')
             print("Done bart prior",flush=True)
