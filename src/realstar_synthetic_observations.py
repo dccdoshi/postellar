@@ -273,5 +273,44 @@ class Observations():
         return self.RV, self.planet
 
     
+    def apply_velocity_shift(self, spectrum, velocity_km_s):
+        '''
+        Shift a spectrum by a given velocity. Note the velocity is passed in km/s
 
-     
+        INPUTS:
+        spectrum: Spectrum to be shifted, with shape [1, N, L]
+        velocity_km_s: velocity (in km/s) that we want to shift the spectrum by.
+        Note: positive values correspond to a redshift, negative values will blueshift
+
+        OUTPUTS: Doppler shifted spectrum in the same shape [1, N, L]
+        '''
+        c = const.c.value
+        
+        #Convert to m/s
+        velocity_ms = torch.tensor(velocity_km_s * 1000, dtype=torch.float64, device=DEVICE)
+
+        # Compute the shift
+        part1 = 1 + (velocity_ms/c)
+        part2 = 1 - (velocity_ms/c)
+        factor = torch.sqrt(part1 / part2)
+        
+        # Shift wavelengths
+        wave = self.inst_wgrid.cpu().numpy()
+        wave_shifted = wave * factor.cpu().numpy()
+        
+        # Get spectrum as numpy [N, L]
+        spec = spectrum[0].cpu().numpy()
+        
+        # Then shift each observation 
+        from scipy.interpolate import interp1d
+        result = []
+        for i in range(spec.shape[0]):
+            f = interp1d(wave_shifted, spec[i], kind='linear', 
+                         bounds_error=False, fill_value=0.0)
+            shifted = f(wave)
+            result.append(shifted)
+        
+        # Convert back to torch [1, N, L]
+        result = torch.tensor(np.array(result), device=spectrum.device, dtype=torch.float64).unsqueeze(0)
+        
+        return result
