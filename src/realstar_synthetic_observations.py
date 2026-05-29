@@ -8,6 +8,7 @@ import PyAstronomy.pyasl as pya
 from astropy.time import Time 
 from astropy.io import fits
 from astropy import constants as const
+from scipy.interpolate import interp1d
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.set_default_dtype(torch.float64) 
@@ -302,7 +303,6 @@ class Observations():
         spec = spectrum[0].cpu().numpy()
         
         # Then shift each observation 
-        from scipy.interpolate import interp1d
         result = []
         for i in range(spec.shape[0]):
             f = interp1d(wave_shifted, spec[i], kind='linear', 
