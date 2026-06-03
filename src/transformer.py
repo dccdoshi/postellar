@@ -7,6 +7,7 @@ import numpy as np
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.set_default_dtype(torch.float64) 
 import time
+
 def forward_model(x_unpad,spec_wgrid_trimmed,inst_wgrid,berv,V):
     '''
     This defines the forward model so how we transform our spectrum parameter into our our spectra that resemble our observations.
@@ -69,49 +70,73 @@ def shift_spectrum(S: torch.Tensor, V: torch.Tensor, W: torch.Tensor,func='conno
         shifted_S = interpolate(shifted_grid,S,W,func)
         return shifted_S
 
+def interpolate(x, y, xs, func='connors'):
+    ''' Function to interpolate from grid x to grid xs, where y is the value on grid x. 
+    For the scipy function, the input can be 3D, but they neeed to be squeezed to 2D [N, L]]
+    '''
+    if func == 'scipy':
+        #the following will remove any leading dimesions of size 1 until we get to the [N, L] shape that scipy expects.
+        # we want to make sure to keep the last dimension which is the wavelength dimension.
+        while x.dim() > 2 and x.size(0) == 1:
+            x = x.squeeze(0)
+        while y.dim() > 2 and y.size(0) == 1:
+            y = y.squeeze(0)
+        while xs.dim() > 2 and xs.size(0) == 1:
+            xs = xs.squeeze(0)
 
-def interpolate(x,y,xs,func='connors'):
+        # Now ensure they are at least 2D
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        if y.dim() == 1:
+            y = y.unsqueeze(0)
+        if xs.dim() == 1:
+            xs = xs.unsqueeze(0)
+        return scipys(x, y, xs)
+    elif func == 'connors':
+        return connors(x, y, xs)
 
-    if func=='scipy':
-        # This is the most accurate as it computes second derivatives but not torch compatible 
-        # or batchwise compatible
-        # Use scipy InterpolatedUnivariateSpline (not batched)
-        ys = scipys(x[0],y[0],xs[0])
-    elif func=='connors':
-        # This is an order of magnitude less accurate but torch compatible and batchwise
-        # compatible making it very fast
-        # Use the batched version of connor's code 
-        ys = connors(x,y,xs)
 
-    return ys 
 
 ### SCIPY INTERPOLATION FUNCTION ########
 def scipys(x,y,xs):
     """
     Interpolate a 2D tensor of spectra using scipy's InterpolatedUnivariateSpline.
 
+    This function has now been updated to processes a batch of spectra (rows of `x` and `y`) and
+    interpolates each onto a new grid `xs`. 
+
     Parameters:
-    - x (torch.Tensor): 2D tensor of shape [N, L] (original x values)
-    - y (torch.Tensor): 2D tensor of shape [N, L] (original y values)
-    - xs (torch.Tensor): 2D tensor of shape [N, L] (new x values for interpolation)
+    x (torch.Tensor): Original wavelengths for each of N spectra.
+    y (torch.Tensor): Original fluxes for each spectrum.
+    xs (torch.Tensor): Target wavelengths (new grid) for each spectrum. These are the PHOENIX grids
 
-    Returns:
-    - ys (torch.Tensor): 2D tensor of shape [N, L] (interpolated y values)
+    Returns
+    -------
+    ys (torch.Tensor): Interpolated fluxes on the new grid `xs` for each spectrum. 
     """
+    N, L = x.shape  #N, is the number of spectra, L is wavelengths points in the original grid
+    M = xs.shape[1]  #target grid number of points
+    ys = torch.zeros(N, M, device=DEVICE, dtype=torch.float64) # Initialize the output tensor of the same shape as xs
 
-    N, L = x.shape
-
-    ys = torch.zeros_like(xs).to(DEVICE)  # Initialize the output tensor of the same shape as xs
-
+    # We are now going to loop through each spectrum individually
     for i in range(N):
-        # For each spectrum (row), create an InterpolatedUnivariateSpline instance
-        spline = InterpolatedUnivariateSpline(x[i].cpu().numpy().astype(np.float64), y[i].cpu().numpy().astype(np.float64), k=3,ext=1)
-        
-        # Interpolate to get the new y values at xs[i]
-        ys[i] = torch.tensor(spline(xs[i].cpu().numpy().astype(np.float64)), dtype=torch.float64).to(DEVICE)
-    
-    return ys
+        #convert to numpy first. We will need to remove any NaNs before interpolation
+        x_np = x[i].cpu().numpy().astype(np.float64)
+        y_np = y[i].cpu().numpy().astype(np.float64)
+        xs_np = xs[i].cpu().numpy().astype(np.float64)
 
+        # Remove NaNs. We get a mask and keep only those in the interpolation
+        valid = ~np.isnan(x_np) & ~np.isnan(y_np)
+
+        #get only the valid points in wavelengths and in flux
+        x_clean = x_np[valid]
+        y_clean = y_np[valid]
+
+        # For each spectrum (row), create an InterpolatedUnivariateSpline instance
+        spline = InterpolatedUnivariateSpline(x_clean, y_clean, k=3, ext=1)
+        # Interpolate to get the new y values at xs[i]
+        ys[i] = torch.tensor(spline(xs_np), dtype=torch.float64).to(DEVICE)
+    return ys
 
 
 def connors(x, y, xs, extend='const'):
