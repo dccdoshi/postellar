@@ -1,4 +1,5 @@
 import os
+import glob
 import numpy as np
 import matplotlib.pyplot as plt
 import astropy.io.fits as fits
@@ -12,6 +13,9 @@ sys.path.append('../src')
 from transformer import *
 from template import Template
 from sbart_rv_finder import RV_Retrieval
+from convolution import *
+from scipy.optimize import minimize_scalar
+
 
 #Local copy!!
 
@@ -75,16 +79,15 @@ def process_one_fits(filepath, order=30):
 
 
 #path to your folder which contain the data and the files you want to process
-data_folder = "../data/Barnard's_Star_Data"
-files = ['2882977t.fits', '3024952t.fits', '2305634t.fits', '3036727t.fits', '2305640t.fits' ]  # List of FITS files to process
+data_folder = "../data/Barnard's_Star_Data/selected_observations"
+files = sorted(glob.glob(os.path.join(data_folder, "*.fits")))
+
 order = 20
-
-# Loop through your observation and process each of them. Make a list of observations which each observation is a dictonary
-
+# Loop through your observation and process each of them. 
+# Make a list of observations which each observation is a dictonary
 observations = []
-for f in files:
-    filepath = os.path.join(data_folder, f)
-    print(f'\nProcessing {f}...')
+for filepath in files:
+    print(f'\nProcessing {os.path.basename(filepath)}...')
 
     obs = process_one_fits(filepath, order=order)
     observations.append(obs)
@@ -100,12 +103,12 @@ for f in files:
 # Okay, at this point we have processed our observations. 
 # We then want to save them in a format that our code can work with. Save as h5 file
 
+#name of the file to save to
 output_file = f'../data/barnards_two_spectra_order_{order}.h5'
 
 # First, prepare the data arrays from your observations list
 n_spectra = len(observations)
 n_pixels = len(observations[0]['wavelength'])
-
 
 
 # Create arrays to store the data
@@ -163,7 +166,6 @@ with h5py.File(output_file, 'r') as f:
     sys_values = torch.tensor(f['sys_array'][:])
 
 
-
 ##### We need to load in the PHOENIX grid to use as the template grid
 
 val_file = f"../data/validation_data/SPIRou{order:02d}_val.df"
@@ -184,10 +186,9 @@ phoenix_wgrid_torch = torch.tensor(phoenix_wgrid, dtype=torch.float64)
 print(f"PHOENIX grid shape: {phoenix_wgrid.shape}")
 
 print(wavelengths_2d)
-# After loading spectra, wavelengths_2d, berv_km, and phoenix_wgrid_torch
 
 # Prepare inputs
-obs_temp = spectra.unsqueeze(0)          # [1, N, L] with L=4088
+obs_temp = spectra.unsqueeze(0)        # [1, N, L] with L=4088
 obs_berv = berv_km * 1000.0              # [N] in m/s
 obs_wgrids = wavelengths_2d              # [N, L] – actual grids per observation
 
@@ -215,7 +216,7 @@ shifted_obs_np = shifted_obs.squeeze(0).cpu().numpy()   # [N, M]
 plt.figure(figsize=(14, 6))
 # Plot each shifted observation
 for i in range(shifted_obs_np.shape[0]):
-    plt.plot(phoenix_wgrid, shifted_obs_np[i, :], alpha=0.5, lw=0.8, label=f'Obs {i+1} (BERV-shifted)')
+    plt.plot(phoenix_wgrid, shifted_obs_np[i, :], alpha=0.5, lw=0.8)
 
 # Plot template
 plt.plot(phoenix_wgrid, template.cpu().numpy(), 'k-', linewidth=1, label='Template')
@@ -226,3 +227,7 @@ plt.ylim(0.6, 1.25)
 plt.legend()
 plt.grid(True, alpha=0.3)
 plt.show()
+
+# Next step is to try and make the RV Retrival work
+
+
