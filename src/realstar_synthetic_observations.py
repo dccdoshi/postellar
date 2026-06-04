@@ -175,11 +175,35 @@ class Observations():
         self.shifted_observations = shift_spectrum(self.right_flux , RV,spec_wgrid_batched,func)
 
         # Theres no additional broadening we include since the templates already include the instrumental broadening
+        ## ADD telluric 
+
+        # Line centers and widths
+        mus = torch.tensor([1310, 1320, 1330], device=DEVICE)
+        sigmas = torch.tensor([0.15, 0.15, 0.15], device=DEVICE)
+
+        # Gaussian profiles
+        self.gaussians = 1-torch.exp(
+            -(self.wgrid[None, None, :] - mus[:, None])**2
+            / (2 * sigmas[:, None]**2)
+        )[0]
+
+        depths = torch.rand(self.N, 3, device=self.wgrid.device) * 0.1  # 1% lines
+
+        profiles = 1.0 - depths[:, :, None] * torch.exp(
+            -(self.wgrid[None, None, :] - mus[None, :, None])**2
+            / (2 * sigmas[None, :, None]**2)
+        )
+        # shape: [3, L]
+
+        # Absorption model
+        absorption = profiles.prod(dim=1)  # [N, L]
+
+        self.telluric_observations = self.shifted_observations* absorption[None, :, :]
 
         # Interpolate to instrument sampling resolution
         spec_wgrid_batched = self.wgrid.view(1, 1, len(self.wgrid)).expand(1, len(RV), len(self.wgrid)).to(DEVICE)
         inst_wgrid_batched = self.inst_wgrid.view(1, 1, len(self.inst_wgrid)).expand(1, len(RV), len(self.inst_wgrid)).to(DEVICE)
-        self.degraded_observations = interpolate(spec_wgrid_batched,self.shifted_observations,inst_wgrid_batched,func)
+        self.degraded_observations = interpolate(spec_wgrid_batched,self.telluric_observations,inst_wgrid_batched,func)
 
         # Place in SNR and add photon noise
         self.noisy_observations = self.degraded_observations.clone().detach() 
@@ -273,5 +297,7 @@ class Observations():
         return self.RV, self.planet
 
     
+    def add_telluric(self):
+        return
 
      
