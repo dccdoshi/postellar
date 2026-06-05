@@ -23,6 +23,7 @@ from scipy.optimize import minimize_scalar
 def process_one_fits(filepath, order=30):
     ''' These are the current pre-processing steps for our Barnard's Star data. '''
     with fits.open(filepath) as hdul:
+        primary_header = hdul[0].header
         fluxab_header = hdul[1].header
         
         berv = fluxab_header['BERV']
@@ -32,7 +33,7 @@ def process_one_fits(filepath, order=30):
         wavelength = hdul['WaveAB'].data[order, :]
         flux = hdul['FluxAB'].data[order, :]
         blaze_correction = hdul['BlazeAB'].data[order, :]
-        
+        observation_number = primary_header['OBSID']   
         sys_velocity = fluxab_header['PP_RV']
     # blaze correct
     flux_blaze_corrected = flux / blaze_correction
@@ -75,7 +76,8 @@ def process_one_fits(filepath, order=30):
         'snr': float(snr),
         'berv': float(berv),
         'filename': os.path.basename(filepath),
-        'sys_velocity': float(sys_velocity)}
+        'sys_velocity': float(sys_velocity),
+        'observationID': observation_number}
 
 
 #path to your folder which contain the data and the files you want to process
@@ -94,6 +96,8 @@ for filepath in files:
     print(f'SNR: {obs["snr"]:.1f}')
     print(f'BERV: {obs["berv"]:.2f} km/s')
     print(f'Systemic velocity: {obs["sys_velocity"]:.2f} m/s')
+    print(f'ObsID: {obs["observationID"]:.2f}')
+
 
     valid = np.sum(~np.isnan(obs['spectrum']))
     print(f'Valid pixels: {valid} out of {len(obs["wavelength"])}')
@@ -192,6 +196,7 @@ obs_temp = spectra.unsqueeze(0)        # [1, N, L] with L=4088
 obs_berv = berv_km * 1000.0              # [N] in m/s
 obs_wgrids = wavelengths_2d              # [N, L] – actual grids per observation
 
+
 # Create template with per-observation grids
 template_obj = Template(
     obs_temp=obs_temp,
@@ -229,5 +234,32 @@ plt.grid(True, alpha=0.3)
 plt.show()
 
 # Next step is to try and make the RV Retrival work
+obs_native = spectra   # shape [N, 4088]
+sig_native = 1.0 / snr_values.unsqueeze(1) * torch.ones_like(obs_native)  # [N, 4088]
+
+# Prepare batch dimensions
+data_batch = obs_native.unsqueeze(0)   # [1, N, 4088]
+sig_batch = sig_native.unsqueeze(0)   # [1, N, 4088]
 
 
+                               #snr_values[0] is a placeholder         
+rv_retrieval = RV_Retrieval(snr_values[0].item(), template, phoenix_wgrid_torch, phoenix_wgrid_torch, len(spectra), "template",  wavelengths_2d)
+
+                                                    #sig_batch are the actyal SNR values of our observations
+planet_rvs, uncs = rv_retrieval.find_dv(data_batch,sig_batch, obs_berv, func='connors')
+
+print("Planet RVs (m/s):", planet_rvs)
+print("Uncertainties (m/s):", uncs)
+
+
+# Number of observations for plotting purposes
+n_obs = len(planet_rvs)
+indices = np.arange(n_obs)
+
+plt.figure(figsize=(12,5))
+mask = np.abs(planet_rvs) < 1000   # keep only values within ±1000 m/s
+plt.errorbar(indices[mask], planet_rvs[mask], yerr=uncs[mask], fmt='o', capsize=3, color='blue', ecolor='gray')
+plt.xlabel('Observation index')
+plt.ylabel('Planet RV (m/s)')
+plt.title(' Radial velocities from template matching')
+plt.show()
