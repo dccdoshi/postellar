@@ -15,12 +15,14 @@ from template import Template
 from sbart_rv_finder import RV_Retrieval
 from convolution import *
 from scipy.optimize import minimize_scalar
+from scipy.interpolate import InterpolatedUnivariateSpline
+from astropy.constants import c
 
 
 #Local copy!!
 
 # Processing part will go in an entirely different script, but I am putting it here for now just to get the data in the right format for POSTELLAR
-def process_one_fits(filepath, order=30):
+def process_one_fits(filepath, order=20):
     ''' These are the current pre-processing steps for our Barnard's Star data. '''
     with fits.open(filepath) as hdul:
         primary_header = hdul[0].header
@@ -73,7 +75,7 @@ def process_one_fits(filepath, order=30):
     return {
         'spectrum': norm_flux.astype(np.float64),
         'wavelength': wavelength.astype(np.float64),
-        'snr': float(snr),
+        'snr': float(snr/np.sqrt(2)),   #we need to divide SNR by 2 to get per pixel instead of resolution element
         'berv': float(berv),
         'filename': os.path.basename(filepath),
         'sys_velocity': float(sys_velocity),
@@ -220,8 +222,13 @@ shifted_obs_np = shifted_obs.squeeze(0).cpu().numpy()   # [N, M]
 
 plt.figure(figsize=(14, 6))
 # Plot each shifted observation
+
 for i in range(shifted_obs_np.shape[0]):
-    plt.plot(phoenix_wgrid, shifted_obs_np[i, :], alpha=0.5, lw=0.8)
+    if i==15:
+        plt.plot(phoenix_wgrid, shifted_obs_np[i, :], alpha=0.5, lw=1.5, label='Obs 15', c='red')
+    else: 
+        plt.plot(phoenix_wgrid, shifted_obs_np[i, :], alpha=0.5, lw=0.8)
+
 
 # Plot template
 plt.plot(phoenix_wgrid, template.cpu().numpy(), 'k-', linewidth=1, label='Template')
@@ -233,7 +240,10 @@ plt.legend()
 plt.grid(True, alpha=0.3)
 plt.show()
 
+######################################################
 # Next step is to try and make the RV Retrival work
+######################################################
+
 obs_native = spectra   # shape [N, 4088]
 sig_native = 1.0 / snr_values.unsqueeze(1) * torch.ones_like(obs_native)  # [N, 4088]
 
@@ -242,10 +252,11 @@ data_batch = obs_native.unsqueeze(0)   # [1, N, 4088]
 sig_batch = sig_native.unsqueeze(0)   # [1, N, 4088]
 
 
-                               #snr_values[0] is a placeholder         
+
+                               #snr_values[0] is a placeholder        
 rv_retrieval = RV_Retrieval(snr_values[0].item(), template, phoenix_wgrid_torch, phoenix_wgrid_torch, len(spectra), "template",  wavelengths_2d)
 
-                                                    #sig_batch are the actyal SNR values of our observations
+                                                    #sig_batch are the actual SNR values of our observations
 planet_rvs, uncs = rv_retrieval.find_dv(data_batch,sig_batch, obs_berv, func='connors')
 
 print("Planet RVs (m/s):", planet_rvs)
@@ -257,9 +268,47 @@ n_obs = len(planet_rvs)
 indices = np.arange(n_obs)
 
 plt.figure(figsize=(12,5))
-mask = np.abs(planet_rvs) < 1000   # keep only values within ±1000 m/s
-plt.errorbar(indices[mask], planet_rvs[mask], yerr=uncs[mask], fmt='o', capsize=3, color='blue', ecolor='gray')
+#mask = np.abs(planet_rvs) < 1000   # keep only values within ±1000 m/s
+plt.errorbar(indices, planet_rvs, yerr=uncs, fmt='o', capsize=3, color='blue', ecolor='gray')
 plt.xlabel('Observation index')
 plt.ylabel('Planet RV (m/s)')
 plt.title(' Radial velocities from template matching')
 plt.show()
+
+
+# SANITY CHECK ON UNCERTAINTIES
+
+def bouchy_uncertainty_from_obs(wavelength, flux, snr, trim_frac=0.005):
+    mask = ~np.isnan(flux)
+
+    w_clean = wavelength[mask]
+    f_clean = flux[mask]
+
+    n = len(w_clean)
+    start = int(trim_frac * n)
+    end = int((1 - trim_frac) * n)
+    w = w_clean[start:end]
+    f = f_clean[start:end]
+
+    A0 = (snr ** 2) * f
+
+    dAdlam = np.gradient(A0, w)
+
+    W = (w * dAdlam) ** 2 / A0
+    Q = np.sqrt(np.sum(W)) / np.sqrt(np.sum(A0))
+    Ne = np.sum(A0)
+
+    deltaV = c.value / (Q * np.sqrt(Ne))   # m/s
+    return deltaV
+
+
+bouchy_uncs = []
+for i in range(len(spectra)):
+    w = wavelengths_2d[i].cpu().numpy()
+    f = spectra[i].cpu().numpy()
+    snr = snr_values[i].item()
+    bu = bouchy_uncertainty_from_obs(w, f, snr)
+    bouchy_uncs.append(bu)
+
+
+print("Bouchy uncertainties (m/s):", bouchy_uncs)

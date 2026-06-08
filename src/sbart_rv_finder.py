@@ -6,6 +6,7 @@ from transformer import *
 from convolution import *
 from scipy.optimize import minimize_scalar
 torch.set_default_dtype(torch.float64) 
+import matplotlib.pyplot as plt
 
 class RV_Retrieval():
     def __init__(self, SNR,model, upsampled_wgrid, instrument_wgrid, Ntemp, type="template", obs_wgrid = None):
@@ -27,12 +28,13 @@ class RV_Retrieval():
 
         #store the per-observation wavelength grids
         self.obs_wgrid = obs_wgrid
+        
 
         pass
 
     def new_model(self, dv, berv,func, i=None):
         '''
-        REAL DATA UPDATE: We need to account for per observation wavelength grids.
+        REAL OBSERVATION UPDATE: We need to account for per observation wavelength grids.
         Need to loop through observations so using an observation index i
 
         This function is used to shift the template by various dv values that represent 
@@ -107,27 +109,27 @@ class RV_Retrieval():
         # Flatten to 1D
         model_y = model_y.view(-1)
         
+        # Mask NaNs in the data
+        valid = ~torch.isnan(data) & ~torch.isnan(model_y)
+
+        # Ensure all arrays will have the same lengths as our valid data points       
+        data_valid = data[valid]
+        model_valid = model_y[valid]
+        sig_valid = sig[valid]
+
         # Only consider the middle portions as the ends may be affected by bad interpolation
         # Will not use ends of spectrum as they will be affected by convolution 
         start = int(len(data)*0.005)
         end = int(len(data)*0.995)
         
-        data_slice = data[start:end]
-        model_slice = model_y[start:end]
-        sig_slice = sig[start:end]
-        
-        # Mask NaNs in the data
-        valid = ~torch.isnan(data_slice) #& ~torch.isnan(model_slice)
-
-        # Ensure all arrays will have the same lengths as our valid data points       
-        data_valid = data_slice[valid]
-        model_valid = model_slice[valid]
-        sig_valid = sig_slice[valid]
+        data_valid = data_valid[start:end]
+        model_valid = model_valid[start:end]    
+        sig_valid = sig_valid[start:end]
         
         # Determine the uncertainty
         sig  = sig_valid**2  #Uncertainty of observation
         if self.type == 'template':
-            sig == (sig**2)*(1+1/self.Ntemp)
+            sig = sig*(1+1/self.Ntemp)
         # This is taken as Equation 2 from (Silva et al. 2022)
         residual = ((data_valid - model_valid))**2/sig
         chi2 = torch.sum(residual).item()
