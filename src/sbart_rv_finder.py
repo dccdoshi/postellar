@@ -28,7 +28,7 @@ class RV_Retrieval():
 
         #store the per-observation wavelength grids
         self.obs_wgrid = obs_wgrid
-        
+
 
         pass
 
@@ -48,9 +48,13 @@ class RV_Retrieval():
         OUTPUTS:
         shifted_model: an array of the template shifted by the various dv values
         '''
-        # if not isinstance(dv, float):
-        #     dv = dv[0]
- 
+        #check to make sure the dv and berv are both tensors
+        # for testing purposes I needed these lines of code
+        if not isinstance(dv, torch.Tensor):
+            dv = torch.tensor([dv], dtype=torch.float64, device=DEVICE)
+        if not isinstance(berv, torch.Tensor):
+            berv = torch.tensor([berv], dtype=torch.float64, device=DEVICE)
+    
         rv = dv+berv
         if rv.ndim==0:
             rv = torch.tensor([rv]).to(DEVICE)
@@ -102,14 +106,14 @@ class RV_Retrieval():
 
         # Calculate the shifted model with the correct grid
         model_y = self.new_model(v, berv, func, i=i)
-
+        
         # Remove batch dimension if present
         if model_y.dim() == 2 and model_y.size(0) == 1:
             model_y = model_y.squeeze(0)
         # Flatten to 1D
         model_y = model_y.view(-1)
         
-        # Mask NaNs in the data
+        # Mask NaNs in the data. They will mainly be on the edges of our data. 
         valid = ~torch.isnan(data) & ~torch.isnan(model_y)
 
         # Ensure all arrays will have the same lengths as our valid data points       
@@ -117,21 +121,29 @@ class RV_Retrieval():
         model_valid = model_y[valid]
         sig_valid = sig[valid]
 
+
         # Only consider the middle portions as the ends may be affected by bad interpolation
         # Will not use ends of spectrum as they will be affected by convolution 
-        start = int(len(data)*0.005)
-        end = int(len(data)*0.995)
+        # Here we have already trimmed off the NaN edges so this should start where our data starts
+        # And we will compute the start/end points based off of our valid data (not NaNs), not the original data
+        # Updated to take off 1% of the spectrum on each end, a bit more conservative on the trimming
         
-        data_valid = data_valid[start:end]
-        model_valid = model_valid[start:end]    
-        sig_valid = sig_valid[start:end]
+        start = int(len(data_valid)*0.01)
+        end = int(len(data_valid)*0.99)
+
+        # Obtained our trimmed data based on our limits set above
+
+        data_trim = data_valid[start:end]
+        model_trim = model_valid[start:end]    
+        sig_trim = sig_valid[start:end]
         
+
         # Determine the uncertainty
-        sig  = sig_valid**2  #Uncertainty of observation
+        sig  = sig_trim**2  #Uncertainty of observation
         if self.type == 'template':
             sig = sig*(1+1/self.Ntemp)
         # This is taken as Equation 2 from (Silva et al. 2022)
-        residual = ((data_valid - model_valid))**2/sig
+        residual = ((data_trim - model_trim))**2/sig
         chi2 = torch.sum(residual).item()
         return chi2
 

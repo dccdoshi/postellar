@@ -75,7 +75,7 @@ def process_one_fits(filepath, order=20):
     return {
         'spectrum': norm_flux.astype(np.float64),
         'wavelength': wavelength.astype(np.float64),
-        'snr': float(snr/np.sqrt(2)),   #we need to divide SNR by 2 to get per pixel instead of resolution element
+        'snr': float(snr/np.sqrt(2)),   #we need to divide SNR by root(2) to get per pixel instead of resolution element
         'berv': float(berv),
         'filename': os.path.basename(filepath),
         'sys_velocity': float(sys_velocity),
@@ -198,6 +198,10 @@ obs_temp = spectra.unsqueeze(0)        # [1, N, L] with L=4088
 obs_berv = berv_km * 1000.0              # [N] in m/s
 obs_wgrids = wavelengths_2d              # [N, L] – actual grids per observation
 
+# Print wavelength range for each observation
+for i in range(len(obs_wgrids)):
+    wgrid = obs_wgrids[i].cpu().numpy()
+    print(f"Observation {i}: {wgrid[0]:.6f} - {wgrid[-1]:.6f} nm")
 
 # Create template with per-observation grids
 template_obj = Template(
@@ -206,6 +210,8 @@ template_obj = Template(
     inst_wgrid=None,                     # not used when obs_wgrids provided
     upsampled_wgrid=phoenix_wgrid_torch, # the PHOENIX grid we want to interpolate to
     obs_wgrids=obs_wgrids)               # the actual wavelength grids for each observation
+
+print(f'THIS IS THE OBSERVATION WAVELENGTH GRID', obs_wgrids.shape)
 
 # Here we are making the template
 template = template_obj.make_template(func='scipy')
@@ -221,7 +227,9 @@ shifted_obs_np = shifted_obs.squeeze(0).cpu().numpy()   # [N, M]
 #Plot to make sure the template worked
 
 plt.figure(figsize=(14, 6))
-# Plot each shifted observation
+#####################################################
+#Plot each shifted observation
+#####################################################
 
 for i in range(shifted_obs_np.shape[0]):
     if i==15:
@@ -240,23 +248,30 @@ plt.legend()
 plt.grid(True, alpha=0.3)
 plt.show()
 
+
+
+
 ######################################################
 # Next step is to try and make the RV Retrival work
 ######################################################
 
-obs_native = spectra   # shape [N, 4088]
+obs_native = spectra   # shape [N, 4088], the native spectra for each observation
+
+#this is the uncertainity grid, currently it is assuming constant uncertainty across all the pixels
+#in the observations
 sig_native = 1.0 / snr_values.unsqueeze(1) * torch.ones_like(obs_native)  # [N, 4088]
 
-# Prepare batch dimensions
+# # Prepare batch dimensions
 data_batch = obs_native.unsqueeze(0)   # [1, N, 4088]
 sig_batch = sig_native.unsqueeze(0)   # [1, N, 4088]
 
 
 
-                               #snr_values[0] is a placeholder        
+                            #snr_values[0] is a placeholder        
 rv_retrieval = RV_Retrieval(snr_values[0].item(), template, phoenix_wgrid_torch, phoenix_wgrid_torch, len(spectra), "template",  wavelengths_2d)
 
-                                                    #sig_batch are the actual SNR values of our observations
+                                                     #OBS_BERV ARE IN m/s       
+                                                     #sig_batch are the flux uncertainties of our observations
 planet_rvs, uncs = rv_retrieval.find_dv(data_batch,sig_batch, obs_berv, func='connors')
 
 print("Planet RVs (m/s):", planet_rvs)
@@ -268,7 +283,6 @@ n_obs = len(planet_rvs)
 indices = np.arange(n_obs)
 
 plt.figure(figsize=(12,5))
-#mask = np.abs(planet_rvs) < 1000   # keep only values within ±1000 m/s
 plt.errorbar(indices, planet_rvs, yerr=uncs, fmt='o', capsize=3, color='blue', ecolor='gray')
 plt.xlabel('Observation index')
 plt.ylabel('Planet RV (m/s)')
@@ -278,7 +292,7 @@ plt.show()
 
 # SANITY CHECK ON UNCERTAINTIES
 
-def bouchy_uncertainty_from_obs(wavelength, flux, snr, trim_frac=0.005):
+def bouchy_uncertainty_from_obs(wavelength, flux, snr, trim_frac=0.01):
     mask = ~np.isnan(flux)
 
     w_clean = wavelength[mask]
@@ -311,4 +325,4 @@ for i in range(len(spectra)):
     bouchy_uncs.append(bu)
 
 
-print("Bouchy uncertainties (m/s):", bouchy_uncs)
+print("Bouchy uncertainties to compare (m/s):", bouchy_uncs)
