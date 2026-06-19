@@ -6,6 +6,7 @@ from transformer import *
 from convolution import *
 from scipy.optimize import minimize_scalar
 torch.set_default_dtype(torch.float64) 
+import matplotlib.pyplot as plt
 
 class RV_Retrieval():
     def __init__(self, SNR,model, upsampled_wgrid, instrument_wgrid, Ntemp, type="template", obs_wgrid = None):
