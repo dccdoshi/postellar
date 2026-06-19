@@ -21,10 +21,6 @@ from convolution import *
 from scipy.optimize import minimize_scalar
 from scipy.interpolate import InterpolatedUnivariateSpline
 from astropy.constants import c
-from torch.autograd.functional import jacobian
-from spectrum_lsf import Score_Likelihood
-
-from pathlib import Path
 
 
 # Processing part will go in an entirely different script, but I am putting it here for now just to get the data in the right format for POSTELLAR
@@ -89,7 +85,7 @@ def process_one_fits(filepath, order):
 
 
 #path to your folder which contain the data and the files you want to process
-data_folder = f"../data/Barnard_Star_Data/selected_observations"
+data_folder = "../data/Barnard's_Star_Data/selected_observations"
 files = sorted(glob.glob(os.path.join(data_folder, "*.fits")))
 
 order = 20
@@ -234,16 +230,16 @@ shifted_obs_np = shifted_obs.squeeze(0).cpu().numpy()   # [N, M]
 print("Template Created")
 # Plot to make sure the template worked
 
-plt.figure(figsize=(14, 6))
-#####################################################
-#Plot each shifted observation
-#####################################################
+# plt.figure(figsize=(14, 6))
+# #####################################################
+# #Plot each shifted observation
+# #####################################################
 
-for i in range(shifted_obs_np.shape[0]):
-    if i==15:
-        plt.plot(phoenix_wgrid, shifted_obs_np[i, :], alpha=0.5, lw=1.5, label='Obs 15', c='red')
-    else: 
-        plt.plot(phoenix_wgrid, shifted_obs_np[i, :], alpha=0.5, lw=0.8)
+# for i in range(shifted_obs_np.shape[0]):
+#     if i==15:
+#         plt.plot(phoenix_wgrid, shifted_obs_np[i, :], alpha=0.5, lw=1.5, label='Obs 15', c='red')
+#     else: 
+#         plt.plot(phoenix_wgrid, shifted_obs_np[i, :], alpha=0.5, lw=0.8)
 
 
 # Plot template
@@ -254,9 +250,7 @@ plt.title(f'BERV-Shifted Barnard observations, computing the template - Order {o
 plt.ylim(0.6, 1.25)
 plt.legend()
 plt.grid(True, alpha=0.3)
-plt.savefig(f'results/plots/template_check_order_{order}.png', dpi=150, bbox_inches='tight')
-plt.close() 
-print(f'Template plot saved as template_check_order_{order}.png')
+plt.show()
 
 
 
@@ -300,117 +294,7 @@ plt.title(' Radial velocities from template matching')
 plt.show()
 
 
-B = 5 #number of posterior samples
-nspec = n_obs 
-
-
-# -------------------
-# Restructure the retrieved RVs to fit the tensor shapes needed for later analysis
-# -------------------
-
-#B copies of the BERVs
-bervs_for_sampling = obs_berv.unsqueeze(0).expand(B, nspec)  #[B, N]
-
-#initial planet RVs
-AtA_rvs = torch.tensor(planet_rvs, dtype=torch.float64).to(DEVICE)  #[N]
-
-#B copies of initial planet RVs 
-planetrv_for_spectrum_sample = AtA_rvs.unsqueeze(0).expand(B, nspec)  #[B, N]
-
-######################################################
- # calculate the information matrix
-######################################################
-
-
-#model and default information
-model_name = f"b8nf16ch2_2_2_2_e500_o{order:02d}"   
-val_file = f"../data/validation_data/SPIRou{order:02d}_val.df"
-checkpoints_directory = f"../../order_model/{model_name}"
-gibbs_steps = 1  # number of Gibbs steps. Currently we are just using 1.
-
-#hardcoded
-bmin= 1e-2
-bmax = 20
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f'Loading model from: {checkpoints_directory}')
-model = ScoreModel(checkpoints_directory=checkpoints_directory, device=device)
-print(f' The model to be used is: {model_name}')
-
-# -------------------
-# Calculate AtA for each observation including the per observation wavelength grid
-# -------------------
-list_AtA = []
-
-#The base flux spectrum
-x = torch.load(f'../data/AtA_spectra/AtA_spectrum_{order}.pt', map_location=DEVICE) #[1, 1, 18681]
-
-# Plot the base spectrum (convert to numpy so we can plot)
-x_np = x.squeeze().numpy()  # remove extra dimensions: [1, 1, 18681] -> [18681]
-wgrid_np = phoenix_wgrid_torch.numpy()
-
-plt.figure(figsize=(14, 6))
-plt.plot(wgrid_np, x_np, 'k-', linewidth=0.8, label='AtA Spectrum')
-plt.xlabel('Wavelength (nm)')
-plt.ylabel('Normalized Flux')
-plt.title(f'AtA Reference Spectrum - Order {order}')
-plt.grid(True, alpha=0.2)
-plt.legend()
-plt.savefig(f'results/plots/ata_spectrum_order_{order}.png')
-plt.close()
-
-
-# we now need to loop through each observation and forward model a 
-# template spectrum to each RV and BERV value of our observations. We also forward model
-# to each varying observational wavelength grid. We then compute the Jacobian of the forward 
-# model to the spectrum
-
-for i in range(nspec):
-    print(f'Computing AtA for observation {i}')
-    
-    # Get the initial planet RV and BERV for this observation
-    planet_chunk = AtA_rvs[i]       
-    berv_chunk = obs_berv[i]      
-    sys_vel = sys_values[i]  #in m/s
-
-    # Reshape for the forward model
-    planetrv_for_A = torch.as_tensor(planet_chunk, device=DEVICE).unsqueeze(0).unsqueeze(0)  # [1,1]
-    berv_for_A = torch.as_tensor(berv_chunk, device=DEVICE).unsqueeze(0).unsqueeze(0)        # [1,1]
-    sys_for_A = torch.as_tensor(sys_vel, device=DEVICE).unsqueeze(0).unsqueeze(0)  # [1,1]
-    print(f'Sys shape: {sys_for_A.shape}')
-    print(f'BERV shape: {berv_for_A.shape}')
-    print(f'Planetary RV shape: {planetrv_for_A.shape}')
-
-    # Use the observation's native wavelength grid
-    native_wgrid = wavelengths_2d[i].to(DEVICE)
-
-    #sanity check to make sure they are actual using the changing wavelength grid
-    print(f'\n Wavelength grid for observation {i}:')
-    print(f' Range: {native_wgrid.min().item():.6f} - {native_wgrid.max().item():.6f} nm')
-    print(f' First 5 wavelengths: {native_wgrid[:5].tolist()}')
-    print(f' Last 5 wavelengths: {native_wgrid[-5:].tolist()}')
-    
-    def f_wrapped(x):
-        # forward_model(x, spec_wgrid_trimmed, inst_wgrid, berv, V)
-        return forward_model(x, phoenix_wgrid_torch, native_wgrid, berv_for_A, planetrv_for_A, sys_for_A)
-    
-    # Compute Jacobian
-    A_full = jacobian(f_wrapped, x, create_graph=False)
-    # extract the relevant part: shape [chunk, L, L]
-    A = A_full[0, 0, :, 0, 0, :]  
-    chunk_AtA = torch.matmul(A, A.transpose(-1, -2))   # [L, L]
-    
-    list_AtA.append(chunk_AtA)
-    del A_full, A, chunk_AtA
-    torch.cuda.empty_cache()
-
-# Do I want to be stacking or concatenating?
-AtA = torch.stack(list_AtA, dim=0)   # [N, L, L]
-print(f'AtA matrix created with shape {AtA.shape}')
-
-
-
-# # SANITY CHECK ON UNCERTAINTIES
+# SANITY CHECK ON UNCERTAINTIES
 
 # def bouchy_uncertainty_from_obs(wavelength, flux, snr, trim_frac=0.01):
 #     mask = ~np.isnan(flux)

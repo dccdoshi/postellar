@@ -276,7 +276,7 @@ class Observations():
     
     def apply_velocity_shift(self, spectrum, velocity_km_s):
         '''
-        Shift a spectrum by a given velocity. Note the velocity is passed in km/s
+        Shift a spectrum by a given velocity. Note the velocity needs to be passed in km/s
 
         INPUTS:
         spectrum: Spectrum to be shifted, with shape [1, N, L]
@@ -305,8 +305,7 @@ class Observations():
         # Then shift each observation 
         result = []
         for i in range(spec.shape[0]):
-            f = interp1d(wave_shifted, spec[i], kind='linear', 
-                         bounds_error=False, fill_value=0.0)
+            f = interp1d(wave_shifted, spec[i], kind='linear', bounds_error=False, fill_value=0.0)
             shifted = f(wave)
             result.append(shifted)
         

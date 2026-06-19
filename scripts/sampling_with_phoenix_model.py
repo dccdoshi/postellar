@@ -147,6 +147,9 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
             planetrv_for_A = torch.as_tensor(planet_chunk, device=device).unsqueeze(0).unsqueeze(0)
             berv_for_A = berv_chunk.unsqueeze(0).unsqueeze(0)
 
+            # THIS WILL HAVE TO TAKE INTO ACCOUNT VEL SYS AS WELL
+            # ACCOUNT FOR VARYING WGRID
+
             def f_wrapped(x):
                 return forward_model(x, obs.wgrid, obs.inst_wgrid, berv_for_A, planetrv_for_A)
 
@@ -176,6 +179,8 @@ for param_idx, (i, snr, nspec) in enumerate(parameters):
             print("I am starting to sample for the spectrum.",flush=True)
 
             # This defines the likelihood function that our posterior sampler will use to do posterior sampling
+
+            #Uncertainities values should be NaN free. If Nans present, mask with closest surrounding value
             LSF = Score_Likelihood(Y=synthetic_spectra, V=planetrv_for_spectrum_sample, sig_n=uncertainty,
                                     spec_wgrid=obs.wgrid, inst_wgrid=obs.inst_wgrid, non_ones=non_ones[0], SNR=snr,
                                     berv=bervs_for_sampling, beta_min=bmin, beta_max=bmax, AtA=AtA)
