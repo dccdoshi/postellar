@@ -397,15 +397,16 @@ for i in range(nspec):
     # Compute Jacobian
     A_full = jacobian(f_wrapped, x, create_graph=False)
     # extract the relevant part: shape [chunk, L, L]
-    A = A_full[0, 0, :, 0, 0, :]  
+    A = A_full[0, :, :, 0, 0, :]  
     chunk_AtA = torch.matmul(A, A.transpose(-1, -2))   # [L, L]
+    print('Chunk AtA', chunk_AtA.shape)
     
     list_AtA.append(chunk_AtA)
     del A_full, A, chunk_AtA
     torch.cuda.empty_cache()
 
 # Do I want to be stacking or concatenating?
-AtA = torch.stack(list_AtA, dim=0)   # [N, L, L]
+AtA = torch.cat(list_AtA)   # [N, L, L]
 print(f'AtA matrix created with shape {AtA.shape}')
 
 
