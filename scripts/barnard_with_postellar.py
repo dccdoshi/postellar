@@ -1,3 +1,14 @@
+#!/home/la304/postellar_env_311/bin/python3
+#SBATCH --tasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --gres=gpu:1
+#SBATCH --mem=10G
+#SBATCH --time=0-01:30
+#SBATCH --account=def-ncowan
+#SBATCH --job-name=posterior_checking
+#SBATCH --output=posterior_checking%j.out
+#SBATCH --error=posterior_checking%j.err
+
 import os
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -6,8 +17,6 @@ import glob
 import numpy as np
 import matplotlib.pyplot as plt
 import astropy.io.fits as fits
-import pandas
-from IPython.display import display
 import pickle
 import h5py
 import torch
@@ -17,15 +26,13 @@ sys.path.append('../src')
 from transformer import *
 from template import Template
 from sbart_rv_finder import RV_Retrieval
-from convolution import *
-from scipy.optimize import minimize_scalar
 from scipy.interpolate import InterpolatedUnivariateSpline
 from astropy.constants import c
 from torch.autograd.functional import jacobian
 from spectrum_lsf import Score_Likelihood
+#from mala import MALA
 
 from pathlib import Path
-
 
 # Processing part will go in an entirely different script, but I am putting it here for now just to get the data in the right format for POSTELLAR
 def process_one_fits(filepath, order):
@@ -33,11 +40,11 @@ def process_one_fits(filepath, order):
     with fits.open(filepath) as hdul:
         primary_header = hdul[0].header
         fluxab_header = hdul[1].header
-        
         berv = fluxab_header['BERV']
         snr_key = f'EXTSN{order:03d}'
         snr = fluxab_header[snr_key]
-        
+        print(snr)
+
         wavelength = hdul['WaveAB'].data[order, :]
         flux = hdul['FluxAB'].data[order, :]
         blaze_correction = hdul['BlazeAB'].data[order, :]
@@ -81,7 +88,7 @@ def process_one_fits(filepath, order):
     return {
         'spectrum': norm_flux.astype(np.float64),
         'wavelength': wavelength.astype(np.float64),
-        'snr': float(snr/np.sqrt(2)),   #we need to divide SNR by root(2) to get per pixel instead of resolution element
+        'snr': float(snr),
         'berv': float(berv),
         'filename': os.path.basename(filepath),
         'sys_velocity': float(sys_velocity),
@@ -151,20 +158,6 @@ with h5py.File(output_file, 'w') as f:
     
 print(f"Data saved to {output_file}")
 
-with h5py.File(output_file, 'r') as f:
-    spectra = torch.tensor(f['spectra'][:])   
-    masks = torch.tensor(f['masks'][:])         
-    wavelengths = torch.tensor(f['wavelengths'][:])
-    berv_km = torch.tensor(f['berv_array'][:])
-    snr_values = torch.tensor(f['snr_array'][:])
-    sys_values = torch.tensor(f['sys_array'][:])
-
-print(f'The shape of the spectra is: {spectra.shape}')
-print(f'The shape of the wavelengths is: {wavelengths.shape}')
-print(f'The shape of the BERV array is: {berv_km.shape}')
-print(f'The shape of the SNR array is: {snr_values.shape}')
-print(f'The shape of the systemic velocity array is: {sys_values.shape}')
-
 ############################################
 # WE have now loaded our data in the format we need. 
 # Next step is to make a template out of these two observations
@@ -178,6 +171,13 @@ with h5py.File(output_file, 'r') as f:
     sys_values = torch.tensor(f['sys_array'][:])
 
 
+print(f'The shape of the spectra is: {spectra.shape}')
+print(f'The shape of the wavelengths is: {wavelengths_2d.shape}')
+print(f'The shape of the BERV array is: {berv_km.shape}')
+print(f'The shape of the SNR array is: {snr_values.shape}')
+print(f'The shape of the systemic velocity array is: {sys_values.shape}')
+
+
 ##### We need to load in the PHOENIX grid to use as the template grid
 
 val_file = f"../data/validation_data/SPIRou{order:02d}_val.df"
@@ -187,7 +187,12 @@ with open(val_file, 'rb') as f:
 
 # Get PHOENIX grid (remove padding where wavelength == 1.0)
 phoenix_wgrid_padded = data['Wavelength'].iloc[0]
+
 phoenix_wgrid = phoenix_wgrid_padded[phoenix_wgrid_padded != 1.0]
+padded_length = len(phoenix_wgrid_padded)
+print(f"Padded grid length: {padded_length}")  
+training_length = len(data['Final'].iloc[0])
+print(f"Training spectrum length: {training_length}")
 
 print(f"\n Loaded PHOENIX grid from {val_file}")
 print(f"Shape: {phoenix_wgrid.shape}")
@@ -196,8 +201,28 @@ print(f"Range: {phoenix_wgrid[0]:.4f} - {phoenix_wgrid[-1]:.4f} nm")
 #convert the wavelenght grid to torch tensor
 phoenix_wgrid_torch = torch.tensor(phoenix_wgrid, dtype=torch.float64)
 print(f"PHOENIX grid shape: {phoenix_wgrid.shape}")
+phoenix_wgrid_np = phoenix_wgrid_torch.cpu().numpy()
 
-print(wavelengths_2d)
+plt.figure(figsize=(14, 6))
+
+# Pick a reference observation (e.g., index 0)
+ref_w = wavelengths_2d[0].cpu().numpy()
+
+for i in range(min(5, len(wavelengths_2d))):
+    w = wavelengths_2d[i].cpu().numpy()
+    # Plot the difference from the reference grid (in nm)
+    diff = w - ref_w
+    plt.plot(diff, alpha=0.7, label=f'Obs {i} - Obs 0')
+
+plt.xlabel('Pixel index')
+plt.ylabel('Wavelength difference from Obs 0 (nm)')
+plt.title('Tiny shifts in wavelength grids (µm level) – crucial for RV precision')
+plt.legend()
+plt.grid(True, alpha=0.3)
+# Zoom in on the y-axis to show the small differences
+plt.ylim(-0.005, 0.005) 
+plt.savefig('results/plots/wavelength_grid_diff.png', dpi=150, bbox_inches='tight')
+plt.close()
 
 # Prepare inputs
 obs_temp = spectra.unsqueeze(0)        # [1, N, L] with L=4088
@@ -212,10 +237,11 @@ for i in range(len(obs_wgrids)):
 # Create template with per-observation grids
 template_obj = Template(
     obs_temp=obs_temp,
-    obs_berv=obs_berv,                   # BERVs of the observations
-    inst_wgrid=None,                     # not used when obs_wgrids provided
-    upsampled_wgrid=phoenix_wgrid_torch, # the PHOENIX grid we want to interpolate to
-    obs_wgrids=obs_wgrids)               # the actual wavelength grids for each observation
+    obs_berv=obs_berv,
+    inst_wgrid=None,
+    upsampled_wgrid=phoenix_wgrid_torch,
+    obs_wgrids=obs_wgrids
+)
 
 print(f'THIS IS THE OBSERVATION WAVELENGTH GRID', obs_wgrids.shape)
 
@@ -226,9 +252,19 @@ print(f"Template shape: {template.shape}")
 print(f"Template has NaNs: {torch.isnan(template).any()}")
 print(f'phoenix_wgrid shape: {phoenix_wgrid_torch.shape}')
 
-
-
 # Retrieve the BERV-shifted observations (stored in template_obj)
+template_nan = template.clone()
+template_nan[template.abs() < 1e-12] = float('nan')
+print(f'Template (zeros replaced with NaNs) has NaNs: {torch.isnan(template_nan).any()}')
+print(f'Number of NaNs: {torch.isnan(template_nan).sum().item()}')
+
+save_dict = {
+    'template': template.cpu(),
+    'phoenix_wgrid': phoenix_wgrid_torch.cpu(),
+    'obs_wgrids': obs_wgrids.cpu() if obs_wgrids is not None else None,
+}
+torch.save(save_dict, 'template_data.pt')
+
 shifted_obs = template_obj.berv_shifted_observations  # shape [1, N, M]
 shifted_obs_np = shifted_obs.squeeze(0).cpu().numpy()   # [N, M]
 print("Template Created")
@@ -238,33 +274,35 @@ plt.figure(figsize=(14, 6))
 #####################################################
 #Plot each shifted observation
 #####################################################
-
 for i in range(shifted_obs_np.shape[0]):
-    if i==15:
+    if i == 15:
         plt.plot(phoenix_wgrid, shifted_obs_np[i, :], alpha=0.5, lw=1.5, label='Obs 15', c='red')
-    else: 
+    else:
         plt.plot(phoenix_wgrid, shifted_obs_np[i, :], alpha=0.5, lw=0.8)
 
-
-# Plot template
-plt.plot(phoenix_wgrid, template.cpu().numpy(), 'k-', linewidth=1, label='Template')
+# Plot NaN-masked template (zeros become NaN, not plotted)
+plt.plot(phoenix_wgrid, template_nan.cpu().numpy(), 'k-', linewidth=1, label='Template (NaNs instead of zeros)')
 plt.xlabel('Wavelength (nm)')
 plt.ylabel('Normalized Flux')
 plt.title(f'BERV-Shifted Barnard observations, computing the template - Order {order}')
-plt.ylim(0.6, 1.25)
+plt.ylim(-0.1, 1.25)
 plt.legend()
 plt.grid(True, alpha=0.3)
-plt.savefig(f'results/plots/template_check_order_{order}.png', dpi=150, bbox_inches='tight')
-plt.close() 
+plt.savefig(f'results/plots/observation_template_check_order_{order}.png', dpi=150, bbox_inches='tight')
+plt.close()
 print(f'Template plot saved as template_check_order_{order}.png')
 
+print(template_nan.cpu().numpy())
+print(len(template_nan.cpu().numpy()))
+print(len(phoenix_wgrid))
 
-
+template_path = f'../data/template_order_{order}.pt'
+torch.save(template, template_path)
+print(f"Template saved to {template_path}")
 
 ######################################################
 # Next step is to try and make the RV Retrival work
 ######################################################
-
 obs_native = spectra   # shape [N, 4088], the native spectra for each observation
 
 #this is the uncertainity grid, currently it is assuming constant uncertainty across all the pixels
@@ -275,10 +313,7 @@ sig_native = 1.0 / snr_values.unsqueeze(1) * torch.ones_like(obs_native)  # [N, 
 data_batch = obs_native.unsqueeze(0)   # [1, N, 4088]
 sig_batch = sig_native.unsqueeze(0)   # [1, N, 4088]
 
-
-
-                            #snr_values[0] is a placeholder        
-rv_retrieval = RV_Retrieval(snr_values[0].item(), template, phoenix_wgrid_torch, phoenix_wgrid_torch, len(spectra), "template",  wavelengths_2d)
+rv_retrieval = RV_Retrieval(snr_values[0].item(), template_nan, phoenix_wgrid_torch, phoenix_wgrid_torch, len(spectra), "template", wavelengths_2d)
 
                                                      #OBS_BERV ARE IN m/s       
                                                      #sig_batch are the flux uncertainties of our observations
@@ -287,6 +322,7 @@ planet_rvs, uncs = rv_retrieval.find_dv(data_batch,sig_batch, obs_berv, func='co
 print("Planet RVs (m/s):", planet_rvs)
 print("Uncertainties (m/s):", uncs)
 
+nspec = len(planet_rvs)
 
 # Number of observations for plotting purposes
 n_obs = len(planet_rvs)
@@ -303,11 +339,6 @@ plt.show()
 B = 5 #number of posterior samples
 nspec = n_obs 
 
-
-# -------------------
-# Restructure the retrieved RVs to fit the tensor shapes needed for later analysis
-# -------------------
-
 #B copies of the BERVs
 bervs_for_sampling = obs_berv.unsqueeze(0).expand(B, nspec)  #[B, N]
 
@@ -321,43 +352,21 @@ planetrv_for_spectrum_sample = AtA_rvs.unsqueeze(0).expand(B, nspec)  #[B, N]
  # calculate the information matrix
 ######################################################
 
-
 #model and default information
-model_name = f"b8nf16ch2_2_2_2_e500_o{order:02d}"   
-val_file = f"../data/validation_data/SPIRou{order:02d}_val.df"
+model_name = f"b8nf16ch2_2_2_2_e500_o{order:02d}"
 checkpoints_directory = f"../../order_model/{model_name}"
+model = ScoreModel(checkpoints_directory=checkpoints_directory, device=DEVICE)
+print(f'Model loaded: {model_name}')
 gibbs_steps = 1  # number of Gibbs steps. Currently we are just using 1.
 
-#hardcoded
-bmin= 1e-2
-bmax = 20
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f'Loading model from: {checkpoints_directory}')
-model = ScoreModel(checkpoints_directory=checkpoints_directory, device=device)
-print(f' The model to be used is: {model_name}')
-
-# -------------------
-# Calculate AtA for each observation including the per observation wavelength grid
-# -------------------
-list_AtA = []
-
 #The base flux spectrum
-x = torch.load(f'../data/AtA_spectra/AtA_spectrum_{order}.pt', map_location=DEVICE) #[1, 1, 18681]
-
-# Plot the base spectrum (convert to numpy so we can plot)
-x_np = x.squeeze().numpy()  # remove extra dimensions: [1, 1, 18681] -> [18681]
-wgrid_np = phoenix_wgrid_torch.numpy()
-
-plt.figure(figsize=(14, 6))
-plt.plot(wgrid_np, x_np, 'k-', linewidth=0.8, label='AtA Spectrum')
-plt.xlabel('Wavelength (nm)')
-plt.ylabel('Normalized Flux')
-plt.title(f'AtA Reference Spectrum - Order {order}')
-plt.grid(True, alpha=0.2)
-plt.legend()
-plt.savefig(f'results/plots/ata_spectrum_order_{order}.png')
-plt.close()
+x_ref = torch.load(f'../data/AtA_spectra/AtA_spectrum_{order}.pt', map_location=DEVICE)
+# ---- 4. Define non_ones ----
+phoenix_wgrid_padded_tensor = torch.tensor(phoenix_wgrid_padded, dtype=torch.float64)
+non_ones_tensor = torch.where(phoenix_wgrid_padded_tensor != 1.0)[0]
+non_ones_start = non_ones_tensor[0].item()
+non_ones_end = non_ones_tensor[-1].item() + 1
+print(f"non_ones range: {non_ones_start} - {non_ones_end}")
 
 
 # we now need to loop through each observation and forward model a 
@@ -365,53 +374,311 @@ plt.close()
 # to each varying observational wavelength grid. We then compute the Jacobian of the forward 
 # model to the spectrum
 
+list_AtA = []
+
+# The base flux spectrum (reference spectrum)
+x = torch.load(f'../data/AtA_spectra/AtA_spectrum_{order}.pt', map_location=DEVICE)
+
 for i in range(nspec):
     print(f'Computing AtA for observation {i}')
     
-    # Get the initial planet RV and BERV for this observation
-    planet_chunk = AtA_rvs[i]       
-    berv_chunk = obs_berv[i]      
-    sys_vel = sys_values[i]  #in m/s
-
-    # Reshape for the forward model
-    planetrv_for_A = torch.as_tensor(planet_chunk, device=DEVICE).unsqueeze(0).unsqueeze(0)  # [1,1]
-    berv_for_A = torch.as_tensor(berv_chunk, device=DEVICE).unsqueeze(0).unsqueeze(0)        # [1,1]
-    sys_for_A = torch.as_tensor(sys_vel, device=DEVICE).unsqueeze(0).unsqueeze(0)  # [1,1]
-    print(f'Sys shape: {sys_for_A.shape}')
-    print(f'BERV shape: {berv_for_A.shape}')
-    print(f'Planetary RV shape: {planetrv_for_A.shape}')
-
-    # Use the observation's native wavelength grid
+    # Get velocities for this observation
+    planet_chunk = AtA_rvs[i]
+    berv_chunk = obs_berv[i]
+    sys_vel = sys_values[i]
+    
+    planetrv_for_A = torch.as_tensor(planet_chunk, device=DEVICE).unsqueeze(0).unsqueeze(0)
+    berv_for_A = torch.as_tensor(berv_chunk, device=DEVICE).unsqueeze(0).unsqueeze(0)
+    sys_for_A = torch.as_tensor(sys_vel, device=DEVICE).unsqueeze(0).unsqueeze(0)
+    
     native_wgrid = wavelengths_2d[i].to(DEVICE)
-
-    #sanity check to make sure they are actual using the changing wavelength grid
-    print(f'\n Wavelength grid for observation {i}:')
-    print(f' Range: {native_wgrid.min().item():.6f} - {native_wgrid.max().item():.6f} nm')
-    print(f' First 5 wavelengths: {native_wgrid[:5].tolist()}')
-    print(f' Last 5 wavelengths: {native_wgrid[-5:].tolist()}')
     
     def f_wrapped(x):
-        # forward_model(x, spec_wgrid_trimmed, inst_wgrid, berv, V)
-        return forward_model(x, phoenix_wgrid_torch, native_wgrid, berv_for_A, planetrv_for_A, sys_for_A)
+        return forward_model(x, phoenix_wgrid_torch, native_wgrid, 
+                             berv_for_A, planetrv_for_A, sys_vel=sys_for_A)
     
     # Compute Jacobian
     A_full = jacobian(f_wrapped, x, create_graph=False)
-    # extract the relevant part: shape [chunk, L, L]
-    A = A_full[0, :, :, 0, 0, :]  
-    chunk_AtA = torch.matmul(A, A.transpose(-1, -2))   # [L, L]
-    print('Chunk AtA', chunk_AtA.shape)
     
+    #extract A
+    A = A_full[0, 0, :, 0, 0, :]
+    chunk_AtA = torch.matmul(A, A.transpose(-1, -2))
+    
+    # save each per-observation AtA
+    torch.save(chunk_AtA.unsqueeze(0), f'ata_matrix_order_{order}_obs{i}.pt')
     list_AtA.append(chunk_AtA)
     del A_full, A, chunk_AtA
     torch.cuda.empty_cache()
 
-# Do I want to be stacking or concatenating?
-AtA = torch.cat(list_AtA)   # [N, L, L]
-print(f'AtA matrix created with shape {AtA.shape}')
+AtA_full = torch.stack(list_AtA, dim=0)  # [N, 4088, 4088]  
+print(f"AtA_full shape after cat: {AtA_full.shape}")  # Should be [20, 4088, 4088]
+
+# Also check the first chunk
+print(f"list_AtA[0] shape: {list_AtA[0].shape}")      # Should be [4088, 4088]
+torch.save(AtA_full, f'ata_matrix_order_{order}.pt')
+
+#Save all data needed for posterior sampling debugging 
+debug_data = {
+    # Observations
+    'spectra': spectra.cpu(),                    # [N, L_obs]
+    'wavelengths_2d': wavelengths_2d.cpu(),      # [N, L_obs]
+    'obs_berv': obs_berv.cpu(),                  # [N]
+    'snr_values': snr_values.cpu(),              # [N]
+    'sys_values': sys_values.cpu(),              # [N]
+    
+    'phoenix_wgrid_padded': phoenix_wgrid_padded,  # [L_padded]
+    'phoenix_wgrid': phoenix_wgrid,              # [L_spec]
+    'padded_length': padded_length,
+    
+    'template': template.cpu(),                  # [L_spec]
+    
+    'AtA_all': AtA_full.cpu(),                  # [N, L_obs, L_obs]
+    
+    'planet_rvs': torch.tensor(planet_rvs).cpu(),  # [N]
+    
+    'model_name': model_name,
+    'checkpoints_directory': checkpoints_directory,
+    
+    'order': order,
+    'nspec': nspec,}
+torch.save(debug_data, f'debug_sampling_data_order_{order}.pt')
+print(f"Saved all debug data to debug_sampling_data_order_{order}.pt")
+
+# fill any internal NaNs by interpolating
+def fill_internal_nans(obs_flux, native_grid):
+    valid_mask = ~torch.isnan(obs_flux)
+    valid_indices = torch.where(valid_mask)[0]
+    if len(valid_indices) == 0:
+        return torch.zeros_like(obs_flux), valid_mask
+    first_valid = valid_indices[0].item()
+    last_valid = valid_indices[-1].item()
+    interior_mask = torch.zeros_like(valid_mask, dtype=torch.bool)
+    interior_mask[first_valid:last_valid+1] = True
+    internal_nan_mask = torch.isnan(obs_flux) & interior_mask
+    obs_flux_filled = obs_flux.clone()
+    if internal_nan_mask.any():
+        valid_interior_mask = valid_mask & interior_mask
+        valid_wavelengths = native_grid[valid_interior_mask]
+        valid_flux = obs_flux[valid_interior_mask]
+        if len(valid_wavelengths) > 1:
+            interpolated_full = interpolate(
+                valid_wavelengths.unsqueeze(0).unsqueeze(0),
+                valid_flux.unsqueeze(0).unsqueeze(0),
+                native_grid.unsqueeze(0).unsqueeze(0)
+            ).squeeze()
+            obs_flux_filled[internal_nan_mask] = interpolated_full[internal_nan_mask]
+    return obs_flux_filled, torch.isnan(obs_flux)
+
+# first we need to find the most conservative NaN mask
+left_edges = []
+right_edges = []
+for i in range(nspec):
+    obs_flux = spectra[i].to(DEVICE)
+    native_grid = wavelengths_2d[i].to(DEVICE)
+    obs_flux_filled, _ = fill_internal_nans(obs_flux, native_grid)
+    valid = ~torch.isnan(obs_flux_filled)
+    valid_indices = torch.where(valid)[0]
+    if len(valid_indices) > 0:
+        left_edges.append(valid_indices[0].item())
+        right_edges.append(valid_indices[-1].item())
+
+common_left = max(left_edges)
+common_right = min(right_edges)
+n_common = common_right - common_left + 1
+
+
+spectra_stack = []
+grids_stack = []
+sig_stack = []
+AtA_stack = []
+berv_stack = []
+sys_stack = []
+rv_stack = []
+
+# trim the data to that length
+for i in range(nspec):
+    obs_flux = spectra[i].to(DEVICE)
+    native_grid = wavelengths_2d[i].to(DEVICE)
+    obs_sig = 1.0 / snr_values.unsqueeze(1) * torch.ones_like(spectra)
+    obs_sig = obs_sig[i].to(DEVICE)
+    
+    obs_flux_filled, _ = fill_internal_nans(obs_flux, native_grid)
+    obs_flux_trimmed = obs_flux_filled[common_left:common_right+1]
+    grid_trimmed = native_grid[common_left:common_right+1]
+    sig_trimmed = obs_sig[common_left:common_right+1]
+    
+    # Trim AtA 
+    AtA_trimmed = AtA_full[i, common_left:common_right+1, common_left:common_right+1]
+    
+    spectra_stack.append(obs_flux_trimmed.cpu())
+    grids_stack.append(grid_trimmed.cpu())
+    sig_stack.append(sig_trimmed.cpu())
+    AtA_stack.append(AtA_trimmed.cpu())
+    berv_stack.append(obs_berv[i].item())
+    sys_stack.append(sys_values[i].item())
+    rv_stack.append(planet_rvs[i].item())
+
+# Convert to tensors onto device
+Y = torch.stack(spectra_stack, dim=0).unsqueeze(0).to(DEVICE)        # [1, N, L_common]
+sig_all = torch.stack(sig_stack, dim=0).unsqueeze(0).to(DEVICE)      # [1, N, L_common]
+AtA_all = torch.stack(AtA_stack, dim=0).to(DEVICE)                   # [N, L_common, L_common]
+grids_all = torch.stack(grids_stack, dim=0).to(DEVICE)               # [N, L_common]
+berv_all = torch.tensor(berv_stack, device=DEVICE).unsqueeze(0)      # [1, N]
+sys_all = torch.tensor(sys_stack, device=DEVICE).unsqueeze(0)        # [1, N]
+V_all = torch.tensor(rv_stack, device=DEVICE).unsqueeze(0)           # [1, N]
+
+print(f"Y shape: {Y.shape}")
+print(f"AtA_all shape: {AtA_all.shape}")
+
+LSF = Score_Likelihood(
+    Y=Y,
+    V=V_all,
+    sig_n=sig_all,
+    berv=berv_all,
+    sys_vel=sys_all,
+    spec_wgrid=phoenix_wgrid_torch.to(DEVICE),
+    inst_wgrid=grids_all[0],            # fallback (unused if obs_wgrids given)
+    non_ones=non_ones_tensor,
+    SNR=snr_values,
+    beta_min=1e-2,
+    beta_max=20,
+    AtA=AtA_all,
+    obs_wgrids=grids_all
+)
+
+# sample from the posterior
+steps = 10000
+print(f"\n Sampling with B={B}, steps={steps}, N={nspec} observations")
+posterior_samples = model.sample(
+    shape=[B, 1, padded_length],
+    steps=steps,
+    likelihood_score_fn=LSF
+)
+
+# remove padding and save everything
+posterior_trimmed = posterior_samples[:, :, non_ones_start:non_ones_end].squeeze(1)
+print(f"Posterior trimmed shape: {posterior_trimmed.shape}")
+
+save_data = {
+    'posterior_trimmed': posterior_trimmed.cpu(),
+    'template': template.cpu(),
+    'phoenix_wgrid_np': phoenix_wgrid_torch.cpu().numpy(),
+    'non_ones_start': non_ones_start,
+    'non_ones_end': non_ones_end,
+    'obs_indices': list(range(nspec)),
+    'spectra': spectra.cpu(),
+    'wavelengths_2d': wavelengths_2d.cpu(),
+    'obs_berv': obs_berv.cpu(),
+    'planet_rvs': torch.tensor(planet_rvs).cpu(),
+    'sys_values': sys_values.cpu(),
+}
+torch.save(save_data, 'posterior_and_data.pt')
+
+# shift template by +sys_vel to get it to match up with posteriors
+sys_vel_shift = sys_values[0].item()  
+template_tensor = template.clone().unsqueeze(0).unsqueeze(0).to(DEVICE)
+phoenix_wgrid_batched = phoenix_wgrid_torch.unsqueeze(0).unsqueeze(0)
+
+shifted_template_tensor = shift_spectrum(
+    template_tensor,
+    torch.tensor([[sys_vel_shift]], device=DEVICE),
+    phoenix_wgrid_batched)
+shifted_template = shifted_template_tensor.squeeze().cpu().numpy()
+
+plt.figure(figsize=(14, 6))
+plt.plot(phoenix_wgrid_np, shifted_template, 'k-', linewidth=1, label='Template (shifted by +sys_vel)')
+for i in range(min(B, 10)):
+    sample = posterior_trimmed[i].cpu().numpy()
+    plt.plot(phoenix_wgrid_np, sample, alpha=0.6, linewidth=1, color='blue')
+plt.xlabel('Wavelength (nm)')
+plt.ylabel('Normalized Flux')
+plt.legend()
+plt.ylim(0.35, None)
+plt.grid(True, alpha=0.3)
+plt.savefig('posterior_samples.png', dpi=150, bbox_inches='tight')
+plt.close()
+
+# zoomed view
+plt.figure(figsize=(14, 6))
+plt.plot(phoenix_wgrid_np, shifted_template, 'k-', linewidth=1, label='Template')
+for i in range(min(B, 10)):
+    sample = posterior_trimmed[i].cpu().numpy()
+    plt.plot(phoenix_wgrid_np, sample, alpha=0.6, linewidth=1, color='blue')
+plt.xlim(1308, 1318)
+plt.ylim(0.35, None)
+plt.xlabel('Wavelength (nm)')
+plt.ylabel('Normalized Flux')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.savefig('posterior_samples_zoom.png', dpi=150, bbox_inches='tight')
+plt.close()
 
 
 
-# # SANITY CHECK ON UNCERTAINTIES
+# sanity checks with plotting
+######
+# plt.figure(figsize=(14, 6))
+
+# wavelengths_np = native_grid.cpu().numpy()
+# obs_flux_np = obs_flux.cpu().numpy()
+# valid_mask_np = valid_mask.cpu().numpy()
+# obs_flux_filled_np = obs_flux_filled.cpu().numpy()
+
+# plt.plot(wavelengths_np[valid_mask_np], obs_flux_np[valid_mask_np], 
+#          'b.', markersize=1, label='Valid Pixels')
+
+# plt.plot(wavelengths_np, obs_flux_filled_np, 
+#          color = 'black', linewidth=0.7, label='Spectrum')
+
+# nan_mask = ~valid_mask_np
+# if nan_mask.sum() > 0:
+#     plt.scatter(wavelengths_np[nan_mask], obs_flux_filled_np[nan_mask],
+#                 color='green', s = 35, marker='x', label='Interpolated pixels')
+    
+#     # Mark valid region edges
+#     if len(valid_indices) > 0:
+#         first_valid_idx = valid_indices[0].item()
+#         last_valid_idx = valid_indices[-1].item()
+#         plt.axvline(wavelengths_np[first_valid_idx], color='gray', linestyle='--', alpha=0.5,
+#                     label='Valid region edges')
+#         plt.axvline(wavelengths_np[last_valid_idx], color='gray', linestyle='--', alpha=0.5)
+
+# plt.xlabel('Wavelength (nm)')
+# plt.ylabel('Normalized Flux')
+# plt.legend()
+# plt.grid(True, alpha=0.3)
+# plt.savefig('obs_filled_check.png', dpi=150, bbox_inches='tight')
+# plt.close()
+
+# # ---- ZOOM: 1305 - 1320 nm ----
+# zoom_min = 1305.0
+# zoom_max = 1320.0
+# zoom_mask = (wavelengths_np >= zoom_min) & (wavelengths_np <= zoom_max)
+
+# plt.figure(figsize=(14, 6))
+# plt.plot(wavelengths_np[zoom_mask], obs_flux_filled_np[zoom_mask], 
+#          'black', linewidth=0.7, label='Spectrum')
+
+# # Valid pixels (blue dots)
+# valid_zoom = valid_mask_np[zoom_mask]
+# plt.plot(wavelengths_np[zoom_mask][valid_zoom], 
+#          obs_flux_np[zoom_mask][valid_zoom], 
+#          'b.', markersize=1, label='Valid Pixels')
+
+# # Filled pixels 
+# filled_zoom = nan_mask[zoom_mask]
+# if filled_zoom.sum() > 0:
+#     plt.scatter(wavelengths_np[zoom_mask][filled_zoom], 
+#                 obs_flux_filled_np[zoom_mask][filled_zoom],
+#                 color='green', s=50, marker='x', label='Interpolated pixels')
+
+# plt.xlabel('Wavelength (nm)')
+# plt.ylabel('Normalized Flux')
+# plt.legend()
+# plt.grid(True, alpha=0.3)
+# plt.savefig('obs_filled_check_zoom_1305_1320.png', dpi=150, bbox_inches='tight')
+# plt.close()
+
 
 # def bouchy_uncertainty_from_obs(wavelength, flux, snr, trim_frac=0.01):
 #     mask = ~np.isnan(flux)
