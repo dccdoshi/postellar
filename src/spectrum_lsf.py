@@ -6,8 +6,9 @@ from transformer import *
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 import time
 from types import SimpleNamespace
-def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgrid, inst_wgrid, non_ones,SNR, beta_min: float,
-                    beta_max: float,AtA: torch.Tensor):
+
+def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: torch.Tensor,berv, sys_vel, spec_wgrid, inst_wgrid, non_ones,SNR, beta_min: float,
+                    beta_max: float,AtA: torch.Tensor, obs_wgrids = None): # REAL DATA UPDATE: added sys_vel, obs_wgrids
     '''
     This is the score likelihood function class. It's inputs are the set of observations and parameters
     that will be used to define the likelihood score. This is function used to compute the posterior sample
@@ -15,19 +16,23 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgr
 
     INPUTS:
     Y: Observations given by a torch tensor of [1, N, L] where N is num of observations and L is length of spectrum (detector)
-    V: Vector of velocities given by a torch tensor of [N]
+       (REAL DATA UPDATE: Y is assumed to have NO NaNs and all observations trimmed to the same common length)
+    V: Vector of velocities given by a torch tensor of [N] (planet RV, m/s)
     sig_n: The sqrt(std) of the gaussian noise added to the observations is [1, N, L]
 
-    berv: observations berv
-    spec_wgrid: the wavelength grid of the continous spectrum
-    inst_wgrid: the wavelength grid of the observation
-    non_ones: this is to unpad the wavelength grid
+    berv: observations berv [N] in m/s
+    sys_vel: systemic velocity [N] in m/s (REAL DATA UPDATE)
+    spec_wgrid: the wavelength grid of the continuous spectrum
+    inst_wgrid: the wavelength grid of the observation (fallback, unused if obs_wgrids is provided)
+    non_ones: indices to unpad the wavelength grid 
     SNR: snr of observations
 
     beta_min: the beta_min used to train the model
     beta_max: the beta_max used to train the model
 
-    AAT: the A matrix to trasnform the uncertainty in diffusion model through the transformation of the sample
+    AAT: the A matrix to transform the uncertainty in diffusion model through the transformation of the sample
+
+    obs_wgrids: [N, L] – per‑observation wavelength grids (REAL DATA UPDATE)
 
     OUTPUTS:
     score_llk: This returns the function that score_models can use to do posterior sampling
@@ -44,18 +49,11 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgr
 
     def find_Sigma(sigma_t,mu,B,N,L,D):
         '''
-        Calcuates the uncertainty matrix used for likelihood calculation
+        Calculates the uncertainty matrix used for likelihood calculation
         '''
-        ## FASTER VERSION
-        # Precompute A A^T once (independent of batch!)
-        # shape [N, L, L]
-        # Scale by sigma_t^2 per batch
         sig_AAt = (sigma_t**2).view(B, 1, 1,1) * AtA.unsqueeze(0)  # [B, N, L, L]
-        # Diagonal mu^2 * sig_n^2 term
         sig_mat = (mu**2).view(B, 1, 1, 1) * torch.diag_embed(sig_n**2).expand(1,N, -1,-1)  # [B,1,L,L]
-        # sig_mat = sig_mat.expand(B, N, L, L)  
-        sig_factor = 1
-        Sigma = sig_AAt*sig_factor + sig_mat
+        Sigma = sig_AAt + sig_mat
         del sig_AAt, sig_mat
 
         return Sigma
@@ -70,20 +68,21 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgr
     
         B, N, L_full = x.shape
 
-        # We will clip the ends because these get messed up from interpolation errors
-        start = int(0.005 * L_full)
-        end = int(0.995 * L_full)
+        # REAL DATA - Trimming 1% from each side (increased from 0.5% in old code)
+        trim_percent = 0.01
+        start = int(trim_percent * L_full)
+        end = int((1 - trim_percent) * L_full)
         
-        x_clip = x[:, :, start:end]                 # [B, N, L]
-        y_clip = y[:, :, start:end] * mu[:, None, None]  # Broadcast instead of repeat
-        sig_clip = sig[:, :, start:end, start:end]  # [B, N, L, L]
+        x_clip = x[:, :, start:end]                 # [B, N, L_trim]
+        y_clip = y[:, :, start:end] * mu.view(B, 1, 1)  # Broadcast instead of repeat
+        sig_clip = sig[:, :, start:end, start:end]  # [B, N, L_trim, L_trim]
 
         # Calculate the residual between data and forward model 
-        resid = y_clip - x_clip                     # [B, N, L]
-        resid = resid.unsqueeze(-1)                 # [B, N, L, 1]
+        resid = y_clip - x_clip                     # [B, N, L_trim]
+        resid = resid.unsqueeze(-1)                 # [B, N, L_trim, 1]
     
         # Cholesky decomposition (batch)
-        L_chol = torch.linalg.cholesky(sig_clip)    # [B, N, L, L]
+        L_chol = torch.linalg.cholesky(sig_clip)    # [B, N, L_trim, L_trim]
     
         # Solve triangular system: L @ z = resid
         z = torch.linalg.solve_triangular(L_chol, resid, upper=False)  # Faster than cholesky_solve for batches
@@ -110,7 +109,7 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgr
         '''
 
         # Dimension
-        B = len(x)
+        B = x.shape[0]
  
         x_unpad = x[:,:,non_ones[0] : non_ones[-1] + 1]
         D = x_unpad.shape[-1]
@@ -122,7 +121,9 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgr
         Sigma = find_Sigma(sigma_t,mu, B,N,L,D) # output is [B,N,L,L]
 
         #### Transform the diffusion model output ####
-        transformed_X = forward_model(x_unpad,spec_wgrid,inst_wgrid,berv,V)
+        # REAL DATA UPDATE - forward_model needs to take sys_vel and obs_wgrids
+        transformed_X = forward_model(x_unpad,spec_wgrid,inst_wgrid,berv,V,sys_vel,
+                                      obs_wgrids=obs_wgrids)
 
         # Calculate likelihood with transformed x
         llk = cholesky_fast(Y,mu,transformed_X,Sigma)
@@ -131,7 +132,7 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: float,berv, spec_wgr
 
     def score_llk(t, x):
         '''
-        This function recieves t, x and outputs the score of the likelihood function with respect to x
+        This function receives t, x and outputs the score of the likelihood function with respect to x
         t = noise parameter (time)
         x = spectrum sample (batched)
         '''
