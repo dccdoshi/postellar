@@ -37,7 +37,7 @@ torch.set_default_dtype(torch.float64)
 # parameters
 ORDER = 20
 OBS_IDX = 0
-ZOOM_RANGE = (1310, 1316) #for the zoomed in plot
+ZOOM_RANGE = (1288, 1295) #for the zoomed in plot
 TRIM_FRACTION = 0.01 
 
 # ------------------------------------------------------------------ 
@@ -196,9 +196,11 @@ mask_finite = (np.isfinite(obs_flux_np) & np.isfinite(truth_interp) &
 wave_finite = wavelength_nm[mask_finite]
 
 #compute residuals!
+wavelength_mask = (wavelength_nm >= wmin) & (wavelength_nm <= wmax)
+mask_finite = mask_finite & wavelength_mask
+wave_finite = wavelength_nm[mask_finite]
 resid_post = truth_interp[mask_finite] - post_interp[mask_finite]
 resid_temp = truth_interp[mask_finite] - temp_interp[mask_finite]
-
 
 #Now plot out an observation so we can ensure that everything is lining up correctly
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True,
