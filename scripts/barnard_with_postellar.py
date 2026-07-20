@@ -2,17 +2,14 @@
 #SBATCH --tasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --gres=gpu:1
-#SBATCH --mem=10G
-#SBATCH --time=0-01:30
+#SBATCH --mem=12G
+#SBATCH --time=0-01:00
 #SBATCH --account=def-ncowan
-#SBATCH --job-name=posterior_checking
-#SBATCH --output=posterior_checking%j.out
-#SBATCH --error=posterior_checking%j.err
+#SBATCH --job-name=posterior_checking_30
+#SBATCH --output=posterior_checking30%j.out
+#SBATCH --error=posterior_checking30%j.err
 
 import os
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
 import glob
 import numpy as np
 import matplotlib.pyplot as plt
@@ -30,7 +27,7 @@ from scipy.interpolate import InterpolatedUnivariateSpline
 from astropy.constants import c
 from torch.autograd.functional import jacobian
 from spectrum_lsf import Score_Likelihood
-#from mala import MALA
+from mala import MALA
 
 from pathlib import Path
 
@@ -99,7 +96,7 @@ def process_one_fits(filepath, order):
 data_folder = f"../data/Barnard_Star_Data/selected_observations"
 files = sorted(glob.glob(os.path.join(data_folder, "*.fits")))
 
-order = 20
+order = 28
 # Loop through your observation and process each of them. 
 # Make a list of observations which each observation is a dictonary
 observations = []
@@ -170,6 +167,11 @@ with h5py.File(output_file, 'r') as f:
     snr_values = torch.tensor(f['snr_array'][:])
     sys_values = torch.tensor(f['sys_array'][:])
 
+spectra = spectra.to(DEVICE)
+wavelengths_2d = wavelengths_2d.to(DEVICE)
+berv_km = berv_km.to(DEVICE)
+snr_values = snr_values.to(DEVICE)
+sys_values = sys_values.to(DEVICE)
 
 print(f'The shape of the spectra is: {spectra.shape}')
 print(f'The shape of the wavelengths is: {wavelengths_2d.shape}')
@@ -200,34 +202,15 @@ print(f"Range: {phoenix_wgrid[0]:.4f} - {phoenix_wgrid[-1]:.4f} nm")
 
 #convert the wavelenght grid to torch tensor
 phoenix_wgrid_torch = torch.tensor(phoenix_wgrid, dtype=torch.float64)
+phoenix_wgrid_torch = phoenix_wgrid_torch.to(DEVICE)
 print(f"PHOENIX grid shape: {phoenix_wgrid.shape}")
 phoenix_wgrid_np = phoenix_wgrid_torch.cpu().numpy()
 
-plt.figure(figsize=(14, 6))
-
-# Pick a reference observation (e.g., index 0)
-ref_w = wavelengths_2d[0].cpu().numpy()
-
-for i in range(min(5, len(wavelengths_2d))):
-    w = wavelengths_2d[i].cpu().numpy()
-    # Plot the difference from the reference grid (in nm)
-    diff = w - ref_w
-    plt.plot(diff, alpha=0.7, label=f'Obs {i} - Obs 0')
-
-plt.xlabel('Pixel index')
-plt.ylabel('Wavelength difference from Obs 0 (nm)')
-plt.title('Tiny shifts in wavelength grids (µm level) – crucial for RV precision')
-plt.legend()
-plt.grid(True, alpha=0.3)
-# Zoom in on the y-axis to show the small differences
-plt.ylim(-0.005, 0.005) 
-plt.savefig('results/plots/wavelength_grid_diff.png', dpi=150, bbox_inches='tight')
-plt.close()
 
 # Prepare inputs
-obs_temp = spectra.unsqueeze(0)        # [1, N, L] with L=4088
-obs_berv = berv_km * 1000.0              # [N] in m/s
-obs_wgrids = wavelengths_2d              # [N, L] – actual grids per observation
+obs_temp = spectra.unsqueeze(0).to(DEVICE)        # [1, N, L]
+obs_berv = (berv_km * 1000.0).to(DEVICE)          # [N] in m/s
+obs_wgrids = wavelengths_2d.to(DEVICE)            # [N, L] – actual grids per observation
 
 # Print wavelength range for each observation
 for i in range(len(obs_wgrids)):
@@ -263,7 +246,7 @@ save_dict = {
     'phoenix_wgrid': phoenix_wgrid_torch.cpu(),
     'obs_wgrids': obs_wgrids.cpu() if obs_wgrids is not None else None,
 }
-torch.save(save_dict, 'template_data.pt')
+torch.save(save_dict, f'template_data_order_{order}.pt')
 
 shifted_obs = template_obj.berv_shifted_observations  # shape [1, N, M]
 shifted_obs_np = shifted_obs.squeeze(0).cpu().numpy()   # [N, M]
@@ -313,11 +296,25 @@ sig_native = 1.0 / snr_values.unsqueeze(1) * torch.ones_like(obs_native)  # [N, 
 data_batch = obs_native.unsqueeze(0)   # [1, N, 4088]
 sig_batch = sig_native.unsqueeze(0)   # [1, N, 4088]
 
-rv_retrieval = RV_Retrieval(snr_values[0].item(), template_nan, phoenix_wgrid_torch, phoenix_wgrid_torch, len(spectra), "template", wavelengths_2d)
+# Convert only what find_dv expects as numpy
+data_batch_np = data_batch.cpu()
+sig_batch_np = sig_batch.cpu()
+obs_berv_np = obs_berv.cpu().numpy()
 
-                                                     #OBS_BERV ARE IN m/s       
-                                                     #sig_batch are the flux uncertainties of our observations
-planet_rvs, uncs = rv_retrieval.find_dv(data_batch,sig_batch, obs_berv, func='connors')
+# Keep obs_wgrids as a tensor (on CPU is fine; the class will move it if needed)
+wavelengths_2d_cpu = wavelengths_2d.cpu()   # tensor, not numpy
+
+rv_retrieval = RV_Retrieval(
+    snr_values[0].item(),
+    template_nan,                 
+    phoenix_wgrid_torch,          
+    phoenix_wgrid_torch,         
+    len(spectra),
+    "template",
+    wavelengths_2d_cpu)
+
+#OBS_BERV ARE IN m/s , sig_batch are the flux uncertainties of our observations
+planet_rvs, uncs = rv_retrieval.find_dv(data_batch_np, sig_batch_np, obs_berv_np, func='connors')
 
 print("Planet RVs (m/s):", planet_rvs)
 print("Uncertainties (m/s):", uncs)
@@ -333,8 +330,8 @@ plt.errorbar(indices, planet_rvs, yerr=uncs, fmt='o', capsize=3, color='blue', e
 plt.xlabel('Observation index')
 plt.ylabel('Planet RV (m/s)')
 plt.title(' Radial velocities from template matching')
-plt.show()
 
+plt.show()
 
 B = 5 #number of posterior samples
 nspec = n_obs 
@@ -353,7 +350,7 @@ planetrv_for_spectrum_sample = AtA_rvs.unsqueeze(0).expand(B, nspec)  #[B, N]
 ######################################################
 
 #model and default information
-model_name = f"b8nf16ch2_2_2_2_e500_o{order:02d}"
+model_name = f"b8nf16ch2_2_2_2_e750_o{order:02d}"
 checkpoints_directory = f"../../order_model/{model_name}"
 model = ScoreModel(checkpoints_directory=checkpoints_directory, device=DEVICE)
 print(f'Model loaded: {model_name}')
@@ -361,7 +358,7 @@ gibbs_steps = 1  # number of Gibbs steps. Currently we are just using 1.
 
 #The base flux spectrum
 x_ref = torch.load(f'../data/AtA_spectra/AtA_spectrum_{order}.pt', map_location=DEVICE)
-# ---- 4. Define non_ones ----
+
 phoenix_wgrid_padded_tensor = torch.tensor(phoenix_wgrid_padded, dtype=torch.float64)
 non_ones_tensor = torch.where(phoenix_wgrid_padded_tensor != 1.0)[0]
 non_ones_start = non_ones_tensor[0].item()
@@ -543,8 +540,7 @@ LSF = Score_Likelihood(
     beta_min=1e-2,
     beta_max=20,
     AtA=AtA_all,
-    obs_wgrids=grids_all
-)
+    obs_wgrids=grids_all)
 
 # sample from the posterior
 steps = 10000
@@ -572,21 +568,21 @@ save_data = {
     'planet_rvs': torch.tensor(planet_rvs).cpu(),
     'sys_values': sys_values.cpu(),
 }
-torch.save(save_data, 'posterior_and_data.pt')
+torch.save(save_data, f'posterior_and_data_order_{order}.pt')
 
-# shift template by +sys_vel to get it to match up with posteriors
+# shift template by -sys_vel to get it to match up with posteriors
 sys_vel_shift = sys_values[0].item()  
 template_tensor = template.clone().unsqueeze(0).unsqueeze(0).to(DEVICE)
 phoenix_wgrid_batched = phoenix_wgrid_torch.unsqueeze(0).unsqueeze(0)
 
 shifted_template_tensor = shift_spectrum(
     template_tensor,
-    torch.tensor([[sys_vel_shift]], device=DEVICE),
+    torch.tensor([[-sys_vel_shift]], device=DEVICE),
     phoenix_wgrid_batched)
 shifted_template = shifted_template_tensor.squeeze().cpu().numpy()
 
 plt.figure(figsize=(14, 6))
-plt.plot(phoenix_wgrid_np, shifted_template, 'k-', linewidth=1, label='Template (shifted by +sys_vel)')
+plt.plot(phoenix_wgrid_np, shifted_template, 'k-', linewidth=1, label='Template (shifted by sys_vel)')
 for i in range(min(B, 10)):
     sample = posterior_trimmed[i].cpu().numpy()
     plt.plot(phoenix_wgrid_np, sample, alpha=0.6, linewidth=1, color='blue')
@@ -595,7 +591,7 @@ plt.ylabel('Normalized Flux')
 plt.legend()
 plt.ylim(0.35, None)
 plt.grid(True, alpha=0.3)
-plt.savefig('posterior_samples.png', dpi=150, bbox_inches='tight')
+plt.savefig(f'posterior_samples_order_{order}.png', dpi=150, bbox_inches='tight')
 plt.close()
 
 # zoomed view
@@ -604,14 +600,24 @@ plt.plot(phoenix_wgrid_np, shifted_template, 'k-', linewidth=1, label='Template'
 for i in range(min(B, 10)):
     sample = posterior_trimmed[i].cpu().numpy()
     plt.plot(phoenix_wgrid_np, sample, alpha=0.6, linewidth=1, color='blue')
-plt.xlim(1308, 1318)
+plt.xlim(1498, 1506)
 plt.ylim(0.35, None)
 plt.xlabel('Wavelength (nm)')
 plt.ylabel('Normalized Flux')
 plt.legend()
 plt.grid(True, alpha=0.3)
-plt.savefig('posterior_samples_zoom.png', dpi=150, bbox_inches='tight')
+plt.savefig(f'posterior_samples_zoom_order_{order}.png', dpi=150, bbox_inches='tight')
 plt.close()
+
+
+
+
+
+
+
+
+
+
 
 
 
