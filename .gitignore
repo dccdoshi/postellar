@@ -1,3 +1,13 @@
+*.pyc
+__pycache__/
+*.h5
+*.pt
+.ipynb_checkpoints/
+results/
+data/
+*.png
+*.err
+*.out
 checkpoints_hires_fourth_new/optimizer_1.7735e+00_999.pt
 checkpoints_hires_fourth_new/optimizer_1.7528e+00_1000.pt
 data/NIRPs53_intrinsic_broadened_train.df
