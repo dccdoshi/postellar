@@ -28,11 +28,11 @@ def forward_model(x_unpad, spec_wgrid_trimmed, inst_wgrid, berv, V, sys_vel=None
         x_unpad = x_unpad.unsqueeze(1)  # [B, L] → [B, 1, L]
     B = x_unpad.shape[0]
 
-    # Total velocity (sign convention: berv + V + sys_vel)
+    # Total velocity (sign convention: berv - sys - V
     if sys_vel is not None:
-        total_vel = berv + V + sys_vel
+        total_vel = berv - sys_vel - V
     else:
-        total_vel = berv + V
+        total_vel = berv - V
 
     # Determine which grid(s) to use
     if obs_wgrids is not None:

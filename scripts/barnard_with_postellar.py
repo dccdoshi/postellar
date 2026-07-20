@@ -577,7 +577,7 @@ phoenix_wgrid_batched = phoenix_wgrid_torch.unsqueeze(0).unsqueeze(0)
 
 shifted_template_tensor = shift_spectrum(
     template_tensor,
-    torch.tensor([[-sys_vel_shift]], device=DEVICE),
+    torch.tensor([[sys_vel_shift]], device=DEVICE),
     phoenix_wgrid_batched)
 shifted_template = shifted_template_tensor.squeeze().cpu().numpy()
 

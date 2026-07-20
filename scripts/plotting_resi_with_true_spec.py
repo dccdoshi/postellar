@@ -150,9 +150,9 @@ def shift_and_interp(model, vel):
         shifted.unsqueeze(0).unsqueeze(0),
         obs_wave_tensor).squeeze().cpu().numpy()
 
-truth_interp = shift_and_interp(empirical_tensor, berv + rv)
-post_interp = shift_and_interp(posterior_mean, berv + rv + sys)
-temp_interp = shift_and_interp(template_tensor, berv + rv)
+truth_interp = shift_and_interp(empirical_tensor, berv - rv)
+post_interp = shift_and_interp(posterior_mean, berv - rv -sys)
+temp_interp = shift_and_interp(template_tensor, berv - rv)
 
 #full spectrum 
 plt.figure(figsize=(14, 6))
@@ -246,9 +246,9 @@ for i in range(N):
             shifted.unsqueeze(0).unsqueeze(0),
             obs_wave_tensor_i).squeeze().cpu().numpy()
 
-    truth_i = shift_and_interp_i(empirical_tensor, berv_i + rv_i)
-    post_i = shift_and_interp_i(posterior_mean, berv_i + rv_i + sys_i)
-    temp_i = shift_and_interp_i(template_tensor, berv_i + rv_i)
+    truth_i = shift_and_interp_i(empirical_tensor, berv_i - rv_i)
+    post_i = shift_and_interp_i(posterior_mean, berv_i - rv_i - sys_i)
+    temp_i = shift_and_interp_i(template_tensor, berv_i - rv_i)
 
     # here we only care about the residuals in the common region
     truth_trim = truth_i[trimmed_left:trimmed_right+1]
