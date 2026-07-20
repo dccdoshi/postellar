@@ -8,44 +8,56 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.set_default_dtype(torch.float64) 
 import time
 
-def forward_model(x_unpad,spec_wgrid_trimmed,inst_wgrid,berv,V, sys_vel = None):
-    '''
-    This defines the forward model so how we transform our spectrum parameter into our our spectra that resemble our observations.
+def forward_model(x_unpad, spec_wgrid_trimmed, inst_wgrid, berv, V, sys_vel=None, obs_wgrids=None):
+    """
+    Forward model with support for both single and per‑observation instrument grids.
 
-    x_unpad is the spectrum samples without their padding 
-    spec_wgrid_trimmed is the native wavelength grid of the spectrum parameter without the padding
-    inst_wgrid is the wavelength grid of our observations (this is assumed to be the same across our observations)
-    berv is the berv value for each observation
-    V is the suggested RV value for each observation
-    REAL DATA UPDATE: systemic velocity for each observation. If None then assumed to be zero.
+    Args:
+        x_unpad: [B, 1, L] or [B, L] – spectrum samples
+        spec_wgrid_trimmed: [L] – PHOENIX wavelength grid
+        inst_wgrid: [L_obs] or [N, L_obs] – instrument grid(s)
+        berv: broadcastable to [B, N]
+        V: broadcastable to [B, N]
+        sys_vel: optional, broadcastable to [B, N]
+        obs_wgrids: [N, L_obs] – alternative to inst_wgrid; if provided, overrides inst_wgrid
 
-    so we go from [B,D] to [B,N,L] where
-    B = the batch size of spectrum samples
-    D = is the length of your spectrum parameter
-    N = the number of observations 
-    L = the length of your spectrum in observation space (instrument pixels)
-    '''
-    # This is the batch size, so the number of spectrum samples we need to transform
-    B = len(x_unpad)
+    Returns:
+        transformed_X: [B, N, L_obs]
+    """
+    if x_unpad.dim() == 2:
+        x_unpad = x_unpad.unsqueeze(1)  # [B, L] → [B, 1, L]
+    B = x_unpad.shape[0]
 
+    # Total velocity (sign convention: berv + V + sys_vel)
     if sys_vel is not None:
         total_vel = berv + V + sys_vel
     else:
         total_vel = berv + V
 
-    # Shift and interpolate to match observations
-    # First we need to batch the spectrum wavelength grid
-    spec_wgrid_batched = spec_wgrid_trimmed.view(1, 1, len(spec_wgrid_trimmed)).expand(B, len(V[0]),len(spec_wgrid_trimmed))
+    # Determine which grid(s) to use
+    if obs_wgrids is not None:
+        inst_wgrids = obs_wgrids                 # [N, L_obs]
+    else:
+        if inst_wgrid.dim() == 1:
+            inst_wgrids = inst_wgrid.unsqueeze(0)  # [1, L_obs]
+        else:
+            inst_wgrids = inst_wgrid                # [N, L_obs]
 
-    # Then we apply a doppler shift to our spectrum samples according to berv and V
-    # We get back the flux values with respect to the orginal spectrum wavelength grid
-    shifted_obs = shift_spectrum(x_unpad,total_vel,spec_wgrid_batched)
+    N = inst_wgrids.shape[0]
+    L_obs = inst_wgrids.shape[1]
+    L_spec = spec_wgrid_trimmed.shape[0]
 
-    # Then we batch the observation wavelength grid
-    inst_wgrid_batched = inst_wgrid.view(1, 1, len(inst_wgrid)).expand(B, len(V[0]), len(inst_wgrid))
+    # Batch PHOENIX grid
+    spec_wgrid_batched = spec_wgrid_trimmed.view(1, 1, -1).expand(B, N, -1)
 
-    # Finally we interpolate our shifted spectra to our observations wavelength grid
-    transformed_X = interpolate(spec_wgrid_batched,shifted_obs,inst_wgrid_batched)
+    # Apply Doppler shift – x_unpad is [B, 1, L]
+    shifted_obs = shift_spectrum(x_unpad, total_vel, spec_wgrid_batched)
+
+    # Batch observation grid
+    inst_wgrid_batched = inst_wgrids.unsqueeze(0).expand(B, N, -1)
+
+    # Interpolate
+    transformed_X = interpolate(spec_wgrid_batched, shifted_obs, inst_wgrid_batched)
 
     return transformed_X
 

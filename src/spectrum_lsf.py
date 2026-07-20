@@ -68,7 +68,7 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: torch.Tensor,berv, s
     
         B, N, L_full = x.shape
 
-        # REAL DATA - Trimming 1% from each side (increased from 0.5% in old code)
+        # REAL DATA UPDATE - Trimming 1% from each side (increased from 0.5%)
         trim_percent = 0.01
         start = int(trim_percent * L_full)
         end = int((1 - trim_percent) * L_full)

@@ -13,7 +13,7 @@ c = torch.tensor(c,dtype=torch.float64,device=DEVICE)
 
 
 class MALA():
-    def __init__(self,obs:torch.Tensor,sig_n:torch.Tensor,berv:torch.Tensor,snr:float,inst_wgrid:torch.Tensor,spec_wgrid:torch.Tensor) -> None:
+    def __init__(self,obs:torch.Tensor,sig_n:torch.Tensor,berv:torch.Tensor,snr:float,inst_wgrid:torch.Tensor,spec_wgrid:torch.Tensor, sys_vel: torch.Tensor) -> None:
         '''
         This is to initalize the MALA object in order to do MALA sampling
         
@@ -33,6 +33,7 @@ class MALA():
         self.snr = snr
         self.inst_wgrid = inst_wgrid
         self.spec_wgrid = spec_wgrid
+        self.sys_vel = sys_vel
 
         # Define the start and end to only evaluate in regimes that aren't impacted by interpolation weirdness
         self.start = int(len(self.obs[0,0])*0.005)
@@ -62,7 +63,13 @@ class MALA():
         # Convert to specific SNR (taken from ENIRIC package) --> this makes it unitless
         A_0 = self.snr**2*self.obs[0,0].cpu().numpy()
         A_0 = A_0[self.start:self.end]#.numpy()
-        Lambda = self.inst_wgrid.cpu().numpy()[self.start:self.end]
+
+                # Extract the first observation's grid for the Bouchy calculation
+        if self.inst_wgrid.dim() == 2:
+            inst_grid = self.inst_wgrid[0].cpu().numpy()
+        else:
+            inst_grid = self.inst_wgrid.cpu().numpy()
+        Lambda = inst_grid[self.start:self.end]
 
         # Compute the uncertainty
         dAdlam = np.gradient(A_0,Lambda)
@@ -195,8 +202,7 @@ class MALA():
         # You have to shift the sampled spectrum by the new sampled V 
 
 
-        sampled_obs = forward_model(S,self.spec_wgrid,self.inst_wgrid,self.berv,x)
-
+        sampled_obs = forward_model(S, self.spec_wgrid, self.inst_wgrid, self.berv,x - self.sys_vel,sys_vel=None)    
         # Compare this with the observations
         norm = dist.Normal(self.obs[:,:,self.start:self.end], cov[:,:,self.start:self.end])
         pdf_values = norm.log_prob(sampled_obs[:,:,self.start:self.end])
@@ -209,8 +215,7 @@ class MALA():
         # Log-probability for a Gaussian
         # You have to shift the sampled spectrum by the new sampled V
 
-        sampled_obs = forward_model(S,self.spec_wgrid,self.inst_wgrid,self.berv,x)
-
+        sampled_obs = forward_model(S, self.spec_wgrid, self.inst_wgrid, self.berv,x - self.sys_vel,sys_vel=None)    
 
         # Compare this with the observations
         norm = dist.Normal(self.obs[:,:,self.start:self.end], cov[:,:,self.start:self.end])

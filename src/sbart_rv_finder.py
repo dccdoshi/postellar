@@ -121,7 +121,6 @@ class RV_Retrieval():
         model_valid = model_y[valid]
         sig_valid = sig[valid]
 
-
         # Only consider the middle portions as the ends may be affected by bad interpolation
         # Will not use ends of spectrum as they will be affected by convolution 
         # Here we have already trimmed off the NaN edges so this should start where our data starts
