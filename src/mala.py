@@ -13,7 +13,8 @@ c = torch.tensor(c,dtype=torch.float64,device=DEVICE)
 
 
 class MALA():
-    def __init__(self,obs:torch.Tensor,sig_n:torch.Tensor,berv:torch.Tensor,snr:float,inst_wgrid:torch.Tensor,spec_wgrid:torch.Tensor, sys_vel: torch.Tensor) -> None:
+    def __init__(self,obs:torch.Tensor,sig_n:torch.Tensor,berv:torch.Tensor,snr:float,inst_wgrid:torch.Tensor, 
+    spec_wgrid:torch.Tensor, sys_vel: torch.Tensor, mask: torch.Tensor = None) -> None:
         '''
         This is to initalize the MALA object in order to do MALA sampling
         
@@ -25,20 +26,28 @@ class MALA():
         inst_wgrid = instruments/observations wavelength grid
         spec_wgrid = wavelength grid of spectrum parameter
 
+        REAL DATA UPDATE - updated to take in a mask to perform the MALA sampling over only the valid pixels
+        # in this case the valid flux pixels being used are those within the full conservative mask + the trimming
+
         '''
-        DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.obs = obs
         self.covariance = sig_n
         self.berv = berv
         self.snr = snr
         self.inst_wgrid = inst_wgrid
         self.spec_wgrid = spec_wgrid
-        self.sys_vel = sys_vel
-
+        self.sys_vel = sys_vel   # storing systemic velocity 
+        
         # Define the start and end to only evaluate in regimes that aren't impacted by interpolation weirdness
-        self.start = int(len(self.obs[0,0])*0.005)
-        self.end = int(len(self.obs[0,0])*0.995)
+        self.start = int(len(self.obs[0, 0]) * 0.005)
+        self.end = int(len(self.obs[0, 0]) * 0.995)
 
+        #get the mask to be used for MALA sampling
+        if mask is not None:
+            self.mask = mask.bool().to(DEVICE)
+        else:
+            self.mask = None
+        
         # Define the unpadded regions of the spectrum 
         self.non_ones = torch.where(self.spec_wgrid != 1)[0]
         pass
@@ -52,6 +61,9 @@ class MALA():
         S: is the sampled spectrum
         steps: how many steps do you want to compute for the sampling 
 
+        REAL DATA UPDATE - without masking out NaNs, A_0 would have NaNs in it (coming from self.obs).
+        This propagated down into Q, Ne, deltaV and step_size. So first we want to extract
+        only the valid A_0 values.
 
         OUTPUTS:
         samples: the final tensor of sampled RVs
@@ -61,38 +73,42 @@ class MALA():
 
         # Calculate bouchy uncertainty
         # Convert to specific SNR (taken from ENIRIC package) --> this makes it unitless
-        A_0 = self.snr**2*self.obs[0,0].cpu().numpy()
-        A_0 = A_0[self.start:self.end]#.numpy()
 
-                # Extract the first observation's grid for the Bouchy calculation
-        if self.inst_wgrid.dim() == 2:
-            inst_grid = self.inst_wgrid[0].cpu().numpy()
+        # Use the mask that was provided
+        if self.mask is not None:
+            mask_np = self.mask[0, 0].cpu().numpy()
+            mask_np = mask_np & (np.arange(len(mask_np)) >= self.start) & (np.arange(len(mask_np)) < self.end)
+            A_all = self.snr**2 * self.obs[0, 0].cpu().numpy()
+            Lambda_all = self.inst_wgrid.cpu().numpy()
+            A_0 = A_all[mask_np]  #keep only the valid A_0 values
+            Lambda = Lambda_all[mask_np]  #keep only the corresponding valid wavelenght values
         else:
-            inst_grid = self.inst_wgrid.cpu().numpy()
-        Lambda = inst_grid[self.start:self.end]
+            A_0 = self.snr**2 * self.obs[0, 0].cpu().numpy()[self.start:self.end]
+            Lambda = self.inst_wgrid.cpu().numpy()[self.start:self.end]
 
         # Compute the uncertainty
-        dAdlam = np.gradient(A_0,Lambda)
+        dAdlam = np.gradient(A_0, Lambda)
         W = (Lambda*dAdlam)**2/A_0
-        Q = np.sqrt(np.sum(W))/np.sqrt(np.sum(A_0))
+        Q = np.sqrt(np.sum(W)) / np.sqrt(np.sum(A_0))
         Ne = np.sum(A_0)
 
         self.deltaV = c/(Q*np.sqrt(Ne))
 
-        step_size = self.deltaV * (700 / self.snr)
+        step_size_float = (self.deltaV * (700 / self.snr)).item()
 
-        
+        step_size = torch.tensor(step_size_float, dtype=torch.float64, device=DEVICE)
+
+
         # Parameters to implement adaptive stepsize
         target_accept_min = 0.30
         target_accept_max = 0.40
-        adapt_rate = 0.2   # how aggressively to adjust step size
-        adapt_window = 25  # how often to update (in steps)
-        
-        
+        adapt_rate = 0.2  # how aggressively to adjust step size
+        adapt_window = 25 # how often to update (in steps)
+
         samples = torch.zeros((steps + 1, x_init.shape[0], x_init.shape[1]), dtype=torch.float64, device=DEVICE)
         accepted = torch.zeros((steps + 1, x_init.shape[0], x_init.shape[1]), dtype=torch.float64, device=DEVICE)
         samples[0] = x_init.clone().to(DEVICE)
-        
+
         with torch.no_grad():
             sample = x_init.clone().to(DEVICE)
             for j in range(1, steps + 1):
@@ -100,19 +116,18 @@ class MALA():
                 sample, accept = self.mala_step(sample, S, step_size)
                 accepted[j] = accept
                 samples[j] = sample
-        
+
                 # Every adapt_window steps, update step size based on acceptance
                 if j % adapt_window == 0:
                     accept_rate = accepted[j - adapt_window + 1:j + 1].mean().item()
-        
+
                     if accept_rate < target_accept_min:
                         step_size *= (1.0 - adapt_rate)
                     elif accept_rate > target_accept_max:
                         step_size *= (1.0 + adapt_rate)
-        
-                    # Optional: clamp to avoid numerical instability
-                    step_size = max(step_size, 1e-6)
-        
+
+                                        # Optional: clamp to avoid numerical instability                    
+                    step_size = torch.max(step_size, torch.tensor(1e-6, device=DEVICE))
                     print(f"Step {j}: acceptance={accept_rate:.3f}, new step_size={step_size:.6f}")
 
         return samples, accepted
@@ -138,8 +153,7 @@ class MALA():
         # If only gaussian noise, define the score function and log probability function as follows
         if gauss:
             score_fn = lambda x: self.score_gaussian(x, S, self.covariance)
-            log_prob_fn =  lambda x: self.log_prob_gaussian(x, S, self.covariance)
-
+            log_prob_fn = lambda x: self.log_prob_gaussian(x, S, self.covariance)
 
         ## HAVE TO CONSIDER THE PROBABILITY OF THE LANGEVIN STEP to maintain detailed balance ##
         def q(xp, x, score_x):
@@ -151,8 +165,7 @@ class MALA():
             else:
                 mu = x + step_size * score_x
                 cov = 2 * step_size
-                return (-0.5 * (xp - mu)**2/cov) #.sum()
-
+                return (-0.5 * (xp - mu)**2 / cov) #.sum()
 
         # Calculate Langevin step #####
 
@@ -161,17 +174,17 @@ class MALA():
         if precond_matrix is not None:
             precond_matrix_squared = precond_matrix @ precond_matrix.T
             dx = step_size * (precond_matrix_squared @ score)
-            dx += np.sqrt(2*step_size) * (precond_matrix @ torch.randn_like(x))
+            dx += torch.sqrt(2*step_size) * (precond_matrix @ torch.randn_like(x))
         else:
             # The step is determined by the stepsize, score, and some randomness (langevin)
-            dx = step_size * score + torch.sqrt(2*step_size) * torch.randn_like(x)
+            dx = step_size * score + torch.sqrt(2 * step_size) * torch.randn_like(x)
 
-        # Proposed langevin step
+        # Proposed langevian step
         x_new = x + dx
-        
+
         # If we only want to do Langevin step #####
         if not rejection_step:
-            # Plain old Langevin
+            # Plain old Lengevin
             return x_new, True
 
         # Metropolis-Hastings Algorithim ####
@@ -196,37 +209,74 @@ class MALA():
         # Return the result tensor and the condition tensor
         return result, condition
 
-    def log_prob_gaussian(self,x:torch.Tensor, S:torch.Tensor, cov:torch.Tensor
-        ) -> torch.Tensor:
+    def log_prob_gaussian(self, x:torch.Tensor, S:torch.Tensor, cov:torch.Tensor) -> torch.Tensor:
+        ''' REAL DATA UPDATE - updated to pass the systemic velocity to our forward model
+        Uses the passed mask to only select from the valid pixels and filters out any NaNs or artifacts that 
+        may arise from interpolation
+        '''
         # Log-probability for a Gaussian
         # You have to shift the sampled spectrum by the new sampled V 
+            
+          
+        sampled_obs = forward_model(S, self.spec_wgrid, self.inst_wgrid, self.berv, x, sys_vel=self.sys_vel)
+        
+        # either use the mask
+        if self.mask is not None:
+            obs_slice = self.obs
+            model_slice = sampled_obs
+            cov_slice = cov
+            finite_mask = self.mask & torch.isfinite(model_slice) & torch.isfinite(cov_slice)
+        # or the trim with start and finish already computed
+        else:
+            obs_slice = self.obs[:, :, self.start:self.end]
+            model_slice = sampled_obs[:, :, self.start:self.end]
+            cov_slice = cov[:, :, self.start:self.end]
+            finite_mask = torch.isfinite(obs_slice) & torch.isfinite(model_slice) & torch.isfinite(cov_slice)
 
+        # extract only the valid pixels
+        obs_finite = obs_slice[finite_mask]
+        model_finite = model_slice[finite_mask]
+        cov_finite = cov_slice[finite_mask]
 
-        sampled_obs = forward_model(S, self.spec_wgrid, self.inst_wgrid, self.berv,x - self.sys_vel,sys_vel=None)    
         # Compare this with the observations
-        norm = dist.Normal(self.obs[:,:,self.start:self.end], cov[:,:,self.start:self.end])
-        pdf_values = norm.log_prob(sampled_obs[:,:,self.start:self.end])
-        prob_values = pdf_values.sum(axis=-1)
+        norm = dist.Normal(obs_finite, cov_finite)
+        pdf_values = norm.log_prob(model_finite)
+        return pdf_values.sum()
 
-        return prob_values
-
-    def log_prob_gaussian_for_score(self,x:torch.Tensor, S:torch.Tensor, cov:torch.Tensor
-        ) -> torch.Tensor:
+    def log_prob_gaussian_for_score(self, x: torch.Tensor, S: torch.Tensor, cov: torch.Tensor) -> torch.Tensor:        
+        ''' REAL DATA UPDATE - updated to pass the systemic velocity to our forward model
+        Uses the passed mask to only select from the valid pixels and filters out any NaNs or artifacts that 
+        may arise from interpolation
+        '''
         # Log-probability for a Gaussian
-        # You have to shift the sampled spectrum by the new sampled V
+        # You have to shift the sampled spectrum by the new sampled V 
+        
+        sampled_obs = forward_model(S, self.spec_wgrid, self.inst_wgrid, self.berv, x, sys_vel=self.sys_vel)
 
-        sampled_obs = forward_model(S, self.spec_wgrid, self.inst_wgrid, self.berv,x - self.sys_vel,sys_vel=None)    
+        # either use the mask
+        if self.mask is not None:
+            obs_slice = self.obs
+            model_slice = sampled_obs
+            cov_slice = cov
+            finite_mask = self.mask & torch.isfinite(model_slice) & torch.isfinite(cov_slice)
+        # or the trim with start and finish already computed
+        else:
+            obs_slice = self.obs[:, :, self.start:self.end]
+            model_slice = sampled_obs[:, :, self.start:self.end]
+            cov_slice = cov[:, :, self.start:self.end]
+            finite_mask = torch.isfinite(obs_slice) & torch.isfinite(model_slice) & torch.isfinite(cov_slice)
+
+        # extract only the valid pixels
+        obs_finite = obs_slice[finite_mask]
+        model_finite = model_slice[finite_mask]
+        cov_finite = cov_slice[finite_mask]
 
         # Compare this with the observations
-        norm = dist.Normal(self.obs[:,:,self.start:self.end], cov[:,:,self.start:self.end])
-        pdf_values = norm.log_prob(sampled_obs[:,:,self.start:self.end])
-        prob_values = pdf_values.sum()
+        norm = dist.Normal(obs_finite, cov_finite)
+        pdf_values = norm.log_prob(model_finite)
+        return pdf_values.sum()
 
-        return prob_values
-
-    def score_gaussian(self,x, mu, cov):
-        ### CHECK TO MAKE SURE ####
+    def score_gaussian(self, x, mu, cov):
         # Gradient of log-probability for a Gaussian
-        scr = grad(self.log_prob_gaussian_for_score,argnums=0)(x,mu,cov)
-        # scr = vmap(grad(self.log_prob_gaussian),in_dims=(None,10,10))(x,mu,cov)
+        scr = grad(self.log_prob_gaussian_for_score, argnums=0)(x,mu,cov)
         return scr
