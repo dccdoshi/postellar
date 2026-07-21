@@ -179,12 +179,12 @@ class MALA():
             # The step is determined by the stepsize, score, and some randomness (langevin)
             dx = step_size * score + torch.sqrt(2 * step_size) * torch.randn_like(x)
 
-        # Proposed langevian step
+        # Proposed langevin step
         x_new = x + dx
 
         # If we only want to do Langevin step #####
         if not rejection_step:
-            # Plain old Lengevin
+            # Plain old Langevin
             return x_new, True
 
         # Metropolis-Hastings Algorithim ####
