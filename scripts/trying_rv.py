@@ -15,7 +15,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.set_default_dtype(torch.float64)
 
 #choosing the order
-ORDER = 20
+ORDER = 12
 
 # previously set parameters from original pipeline
 STEPS = 1000
@@ -34,10 +34,13 @@ phoenix_wgrid_torch = torch.tensor(phoenix_wgrid_np, dtype=torch.float64, device
 spectra = post_data['spectra'].to(DEVICE)
 wavelengths_2d = post_data['wavelengths_2d'].to(DEVICE)   # shape [N_obs, N_pix]
 obs_berv = post_data['obs_berv'].to(DEVICE)      # m/s
-planet_rvs = post_data['planet_rvs'].to(DEVICE)  # m/s
+planet_rvs = post_data['planet_rvs'].to(DEVICE)  # m/s (template RVs)
+template_uncs = post_data['template_uncs'].cpu().numpy()   # template RVs uncertainties m/s
 sys_values = post_data['sys_values'].to(DEVICE)  # m/s
 snr_values = debug_data['snr_values']
 
+#for plotting
+template_rvs = planet_rvs.cpu().numpy()
 
 # Compute common range + 1% trim (same as residual analysis)
 N = len(spectra)
@@ -69,15 +72,15 @@ S = model.unsqueeze(0).unsqueeze(0)
 # perform the MALA sampling
 all_samples = []
 for i in range(N):
-    sys_values_i = sys_values[i].item()
     snr_i = snr_values[i].item()
+    sys_i = sys_values[i].item()
     obs_i = spectra[i].unsqueeze(0).unsqueeze(0)
     sig_i = (1.0 / snr_values[i]).to(DEVICE).unsqueeze(0).unsqueeze(0).expand_as(obs_i)
     # get each observations wavelength grid
     inst_wgrid_i = wavelengths_2d[i].clone().detach().to(DEVICE)
-    berv_i = obs_berv[i].unsqueeze(0)   # m/s 
-    x_init = planet_rvs[i].clone().detach().view(1,1)   # m/s
-
+    berv_i = obs_berv[i].unsqueeze(0)   # m/s
+    x_init = planet_rvs[i].clone().detach().view(1,1)   # m/s 
+    
     # get the valid pixel mask
     finite_mask = torch.isfinite(obs_i)
 
@@ -91,7 +94,7 @@ for i in range(N):
 
     # Pass berv and sys_vel separately
     mala = MALA(obs_i, sig_i, berv_i, snr_i, inst_wgrid_i, phoenix_wgrid_torch,
-                sys_vel=sys_values_i, mask=mask)
+                sys_vel=sys_i, mask=mask)
     samples, _ = mala.find_rv(x_init, S, steps=STEPS)
     all_samples.append(samples[:, 0, 0].cpu().numpy())
 
@@ -99,13 +102,17 @@ for i in range(N):
 rv_means = [np.mean(s[BURN:]) for s in all_samples]
 rv_stds  = [np.std(s[BURN:]) for s in all_samples]
 
+# now compare the template and the mala RVs
 plt.figure(figsize=(10,6))
-plt.errorbar(np.arange(N), rv_means, yerr=rv_stds, fmt='o', capsize=3, ecolor='gray', color='blue')
+plt.errorbar(np.arange(N), rv_means, yerr=rv_stds, fmt='o', capsize=3, ecolor='gray', color='blue', label='MALA RVs')
+plt.errorbar(np.arange(N), template_rvs, yerr=template_uncs, fmt='s', capsize=3, ecolor='gray', color='red', label='Template RVs')
 plt.xlabel('Observation index')
 plt.ylabel('RV (m/s)')
-plt.title(f'Radial velocities from MALA')
+plt.title(f'Order {ORDER}')
+plt.legend()
+plt.grid(True, alpha=0.3)
 plt.tight_layout()
-plt.savefig(f'rv_curve_order{ORDER}.png', dpi=150)
+plt.savefig(f'rv_comparison_order{ORDER}.png', dpi=150)
 plt.close()
 
 for i in range(len(rv_means)):

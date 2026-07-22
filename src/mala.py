@@ -27,7 +27,9 @@ class MALA():
         spec_wgrid = wavelength grid of spectrum parameter
 
         REAL DATA UPDATE - updated to take in a mask to perform the MALA sampling over only the valid pixels
-        # in this case the valid flux pixels being used are those within the full conservative mask + the trimming
+        in this case the valid flux pixels being used are those within the full conservative mask + the trimming
+
+        REAL DATA UPDATE - explicitly passing the systemic velocity is also important now, used in the forward model
 
         '''
         self.obs = obs
@@ -81,7 +83,7 @@ class MALA():
             A_all = self.snr**2 * self.obs[0, 0].cpu().numpy()
             Lambda_all = self.inst_wgrid.cpu().numpy()
             A_0 = A_all[mask_np]  #keep only the valid A_0 values
-            Lambda = Lambda_all[mask_np]  #keep only the corresponding valid wavelenght values
+            Lambda = Lambda_all[mask_np]  #keep only the corresponding valid wavelength values
         else:
             A_0 = self.snr**2 * self.obs[0, 0].cpu().numpy()[self.start:self.end]
             Lambda = self.inst_wgrid.cpu().numpy()[self.start:self.end]
