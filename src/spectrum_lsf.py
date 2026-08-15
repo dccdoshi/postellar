@@ -8,7 +8,7 @@ import time
 from types import SimpleNamespace
 
 def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: torch.Tensor,berv, sys_vel, spec_wgrid, inst_wgrid, non_ones,SNR, beta_min: float,
-                    beta_max: float,AtA: torch.Tensor, obs_wgrids = None): # REAL DATA UPDATE: added sys_vel, obs_wgrids
+                    beta_max: float,AtA: torch.Tensor, obs_wgrids = None): 
     '''
     This is the score likelihood function class. It's inputs are the set of observations and parameters
     that will be used to define the likelihood score. This is function used to compute the posterior sample
@@ -16,23 +16,21 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: torch.Tensor,berv, s
 
     INPUTS:
     Y: Observations given by a torch tensor of [1, N, L] where N is num of observations and L is length of spectrum (detector)
-       (REAL DATA UPDATE: Y is assumed to have NO NaNs and all observations trimmed to the same common length)
+    REAL DATA UPDATE: Y is assumed to have NO NaNs and all observations trimmed to the same common length
     V: Vector of velocities given by a torch tensor of [N] (planet RV, m/s)
     sig_n: The sqrt(std) of the gaussian noise added to the observations is [1, N, L]
-
     berv: observations berv [N] in m/s
-    sys_vel: systemic velocity [N] in m/s (REAL DATA UPDATE)
+    REAL DATA UPDATE - sys_vel: systemic velocity [N] in m/s
     spec_wgrid: the wavelength grid of the continuous spectrum
     inst_wgrid: the wavelength grid of the observation (fallback, unused if obs_wgrids is provided)
+    REAL DATA UPDATE - obs_wgrids: [N, L] - per observation wavelength grids
     non_ones: indices to unpad the wavelength grid 
-    SNR: snr of observations
+    SNR: snr of observations, not used in this file
 
     beta_min: the beta_min used to train the model
     beta_max: the beta_max used to train the model
 
     AAT: the A matrix to transform the uncertainty in diffusion model through the transformation of the sample
-
-    obs_wgrids: [N, L] – per‑observation wavelength grids (REAL DATA UPDATE)
 
     OUTPUTS:
     score_llk: This returns the function that score_models can use to do posterior sampling
@@ -51,9 +49,13 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: torch.Tensor,berv, s
         '''
         Calculates the uncertainty matrix used for likelihood calculation
         '''
+        # Precompute A A^T once (independent of batch!)
+        # shape [N, L, L]
+        # Scale by sigma_t^2 per batch
         sig_AAt = (sigma_t**2).view(B, 1, 1,1) * AtA.unsqueeze(0)  # [B, N, L, L]
         sig_mat = (mu**2).view(B, 1, 1, 1) * torch.diag_embed(sig_n**2).expand(1,N, -1,-1)  # [B,1,L,L]
-        Sigma = sig_AAt + sig_mat
+        sig_factor = 1
+        Sigma = sig_AAt*sig_factor + sig_mat
         del sig_AAt, sig_mat
 
         return Sigma
@@ -68,13 +70,13 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: torch.Tensor,berv, s
     
         B, N, L_full = x.shape
 
-        # REAL DATA UPDATE - Trimming 1% from each side (increased from 0.5%)
+        # REAL DATA UPDATE - Trimming 1% from each side (this has increased from 0.5%)
         trim_percent = 0.01
         start = int(trim_percent * L_full)
         end = int((1 - trim_percent) * L_full)
         
         x_clip = x[:, :, start:end]                 # [B, N, L_trim]
-        y_clip = y[:, :, start:end] * mu.view(B, 1, 1)  # Broadcast instead of repeat
+        y_clip = y[:, :, start:end] * mu.view(B, 1, 1)  # one mu per draw
         sig_clip = sig[:, :, start:end, start:end]  # [B, N, L_trim, L_trim]
 
         # Calculate the residual between data and forward model 
