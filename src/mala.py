@@ -3,103 +3,134 @@ from transformer import *
 import torch.distributions as dist
 from torch.func import grad
 import torch
-from torch.func import grad
 from astropy.constants import c
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.set_default_dtype(torch.float64)
 
-c = torch.tensor(c,dtype=torch.float64,device=DEVICE)
-
+c = torch.tensor(c, dtype=torch.float64, device=DEVICE)
 
 class MALA():
-    def __init__(self,obs:torch.Tensor,sig_n:torch.Tensor,berv:torch.Tensor,snr:float,inst_wgrid:torch.Tensor, 
-    spec_wgrid:torch.Tensor, sys_vel: torch.Tensor, mask: torch.Tensor = None) -> None:
+    def __init__(self, obs: torch.Tensor, sig_n: torch.Tensor, berv: torch.Tensor, snr, inst_wgrid: torch.Tensor,
+                 spec_wgrid: torch.Tensor, sys_vel: torch.Tensor, mask: torch.Tensor = None) -> None:
         '''
         This is to initalize the MALA object in order to do MALA sampling
-        
-        INTPUTS:
+
+        INPUTS:
         obs = This is the observations used for sampling
-        sig_n = This is the std of the gaussian noise estimated for the observations
+        sig_n = This is the std of the gaussian noise estimated for the observations. In real data this is 1/SNR
         berv = the bervs of your observation
         snr = the snr of your observations
-        inst_wgrid = instruments/observations wavelength grid
-        spec_wgrid = wavelength grid of spectrum parameter
-
-        REAL DATA UPDATE - updated to take in a mask to perform the MALA sampling over only the valid pixels
-        in this case the valid flux pixels being used are those within the full conservative mask + the trimming
-
-        REAL DATA UPDATE - explicitly passing the systemic velocity is also important now, used in the forward model
-
+        REAL DATA UPDATE - snr can now be a single float OR a per-observation tensor. The step size is computed from this, and needs each obs appropriate SNR
+        inst_wgrid = instruments/observation's wavelength grids
+        spec_wgrid = wavelength grid of spectrum parameter (PHOENIX grid)
+        REAL DATA UPDATE - mask: updated to take in a mask to perform the MALA sampling over only the valid pixels
+        REAL DATA UPDATE - sys_vel: explicitly passing the systemic velocity is also important now, used in the forward model
         '''
         self.obs = obs
         self.covariance = sig_n
         self.berv = berv
-        self.snr = snr
         self.inst_wgrid = inst_wgrid
         self.spec_wgrid = spec_wgrid
-        self.sys_vel = sys_vel   # storing systemic velocity 
-        
+        self.sys_vel = sys_vel
+
+        # REAL DATA UPDATE - snr can be accepted as either a scalar or a per-observation tensor
+        if torch.is_tensor(snr):
+            self.snr = snr.to(DEVICE).flatten().double()
+        else:
+            self.snr = torch.as_tensor(snr, dtype=torch.float64, device=DEVICE).flatten()
+
+        # Fallback case for synthetic data
         # Define the start and end to only evaluate in regimes that aren't impacted by interpolation weirdness
         self.start = int(len(self.obs[0, 0]) * 0.005)
         self.end = int(len(self.obs[0, 0]) * 0.995)
 
-        #get the mask to be used for MALA sampling
         if mask is not None:
             self.mask = mask.bool().to(DEVICE)
         else:
             self.mask = None
-        
-        # Define the unpadded regions of the spectrum 
+
+        # Define the unpadded regions of the spectrum
         self.non_ones = torch.where(self.spec_wgrid != 1)[0]
         pass
 
-    def find_rv(self,x_init:torch.Tensor,S:torch.Tensor,steps:int):
+    def find_rv(self, x_init: torch.Tensor, S: torch.Tensor, steps: int):
         '''
         This function does the sampling routine by calling the function mala_step
-
+        
         INPUTS:
         x_init: current sample (this is the starting point RV which will be given by the template RVs)
         S: is the sampled spectrum
         steps: how many steps do you want to compute for the sampling 
 
-        REAL DATA UPDATE - without masking out NaNs, A_0 would have NaNs in it (coming from self.obs).
-        This propagated down into Q, Ne, deltaV and step_size. So first we want to extract
-        only the valid A_0 values.
 
         OUTPUTS:
         samples: the final tensor of sampled RVs
         accepted: the final tensor for which samples had accepted new steps
+
+        REAL DATA UPDATE - previously the step size was computed ONCE, using only self.obs[0,0] and a shared snr
+        It was then applied identically to every observation.
+        This is no longer valid as real data will have varying SNRs
+        Now looped per observation below, each using its own snr and its own data. step_size is shape [1, N].
         '''
-        # Define stepsize based on the bouchy limit uncertainty
+        N = self.obs.shape[1]  #number of observations
+
+        if self.inst_wgrid.dim() == 1:  # Case for synthetic data
+            inst_wgrid_per_obs = self.inst_wgrid.unsqueeze(0).expand(N, -1)
+        else:                           # Real data
+            inst_wgrid_per_obs = self.inst_wgrid
+
+        if self.snr.numel() == 1:  #Synthetic data has one consistent SNR
+            snr_arr = self.snr.expand(N)
+        else:                      # Real data has a varying SNR
+            snr_arr = self.snr
+
+        if self.mask is not None:
+            mask_np_common = self.mask[0, 0].cpu().numpy()
+        else:
+            mask_np_common = None
+
+        # REAL DATA UPDATE - step size needs to be computed PER OBSERVATION, not once globally
+        deltaVs = torch.zeros(N, dtype=torch.float64, device=DEVICE)
+        step_sizes = torch.zeros(N, dtype=torch.float64, device=DEVICE)
 
         # Calculate bouchy uncertainty
         # Convert to specific SNR (taken from ENIRIC package) --> this makes it unitless
+        for i in range(N):
+            snr_i = float(snr_arr[i].item())
+            Lambda_full = inst_wgrid_per_obs[i].cpu().numpy()
+            obs_i_np = self.obs[0, i].cpu().numpy()
+            A_full = snr_i ** 2 * obs_i_np
 
-        # Use the mask that was provided
-        if self.mask is not None:
-            mask_np = self.mask[0, 0].cpu().numpy()
-            mask_np = mask_np & (np.arange(len(mask_np)) >= self.start) & (np.arange(len(mask_np)) < self.end)
-            A_all = self.snr**2 * self.obs[0, 0].cpu().numpy()
-            Lambda_all = self.inst_wgrid.cpu().numpy()
-            A_0 = A_all[mask_np]  #keep only the valid A_0 values
-            Lambda = Lambda_all[mask_np]  #keep only the corresponding valid wavelength values
-        else:
-            A_0 = self.snr**2 * self.obs[0, 0].cpu().numpy()[self.start:self.end]
-            Lambda = self.inst_wgrid.cpu().numpy()[self.start:self.end]
+            if mask_np_common is not None:   # for real data
+                base_mask_i = mask_np_common
+            else:                            # for synthetic data using the start/end parameters
+                base_mask_i = np.zeros(len(obs_i_np), dtype=bool)
+                base_mask_i[self.start:self.end] = True
 
-        # Compute the uncertainty
-        dAdlam = np.gradient(A_0, Lambda)
-        W = (Lambda*dAdlam)**2/A_0
-        Q = np.sqrt(np.sum(W)) / np.sqrt(np.sum(A_0))
-        Ne = np.sum(A_0)
+            # REAL DATA UPDATE - interior NaN check on this observation's own data
+            finite_i = np.isfinite(obs_i_np)
+            # Combines the two masks, the common range and the interior NaN checks. Any NaNs in the gradients causes it to break
+            combined_mask_i = base_mask_i & finite_i
 
-        self.deltaV = c/(Q*np.sqrt(Ne))
+            # Subset to only valid data
+            A_0 = A_full[combined_mask_i]
+            Lambda = Lambda_full[combined_mask_i]
 
-        step_size_float = (self.deltaV * (700 / self.snr)).item()
+            # Compute the uncertainty
+            dAdlam = np.gradient(A_0, Lambda)
+            W = (Lambda * dAdlam) ** 2 / A_0
+            Q = np.sqrt(np.sum(W)) / np.sqrt(np.sum(A_0))
+            Ne = np.sum(A_0)
 
-        step_size = torch.tensor(step_size_float, dtype=torch.float64, device=DEVICE)
+            deltaV_i = (c / (Q * np.sqrt(Ne))).item()
+            deltaVs[i] = deltaV_i
+            step_sizes[i] = deltaV_i * (700.0 / snr_i)
 
+        self.deltaV_per_obs = deltaVs
+        self.deltaV = deltaVs[0]  #observation 0's only
+
+        step_size = step_sizes.clamp(min=1e-6).view(1, N)
 
         # Parameters to implement adaptive stepsize
         target_accept_min = 0.30
@@ -114,32 +145,32 @@ class MALA():
         with torch.no_grad():
             sample = x_init.clone().to(DEVICE)
             for j in range(1, steps + 1):
-                # New step in markov chain using langevin dynamics
                 sample, accept = self.mala_step(sample, S, step_size)
                 accepted[j] = accept
                 samples[j] = sample
 
-                # Every adapt_window steps, update step size based on acceptance
+                # REAL DATA UPDATE - this update is now PER OBSERVATION (torch.where across [1,N]),
+                # rather than a single shared scalar accept_rate/step_size update
                 if j % adapt_window == 0:
-                    accept_rate = accepted[j - adapt_window + 1:j + 1].mean().item()
+                    accept_rate = accepted[j - adapt_window + 1: j + 1].mean(dim=(0, 1)).view(1, N)
+                    # REAL DATA UPDATE - torch.where instead of the if/elif statements. This is since accept_rate is [1,N] and each obs is adjusted independently 
+                    step_size = torch.where(accept_rate < target_accept_min, step_size * (1.0 - adapt_rate), step_size)
+                    step_size = torch.where(accept_rate > target_accept_max, step_size * (1.0 + adapt_rate), step_size)
 
-                    if accept_rate < target_accept_min:
-                        step_size *= (1.0 - adapt_rate)
-                    elif accept_rate > target_accept_max:
-                        step_size *= (1.0 + adapt_rate)
-
-                                        # Optional: clamp to avoid numerical instability                    
-                    step_size = torch.max(step_size, torch.tensor(1e-6, device=DEVICE))
-                    print(f"Step {j}: acceptance={accept_rate:.3f}, new step_size={step_size:.6f}")
+                    # Optional: clamp to avoid numerical instability
+                    # REAL DATA UPDATE - step_size is now a tensor, [1, N] so clamp instead of max()
+                    step_size = step_size.clamp(min=1e-6)
+                    print(f"Step {j}: mean acceptance={accept_rate.mean().item():.3f}, "
+                          f"step_size range=[{step_size.min().item():.6f}, {step_size.max().item():.6f}]")
 
         return samples, accepted
 
-    def mala_step(self, x:torch.Tensor, S:torch.Tensor, step_size=1e-4, gauss=True,precond_matrix=None, rejection_step=True):
+    def mala_step(self, x: torch.Tensor, S: torch.Tensor, step_size=1e-4, gauss = True, precond_matrix = None, rejection_step=True):    
         '''
-        This function proposes a new step using Langevin sampling. Langevin sampling proposes a new step by combinging the score of the probability distribution
+        This function proposes a new step using Langevin sampling. Langevin sampling proposes a new step by combining the score of the probability distribution
         and a random walk, in order to walk towards regions of high probability while still including some random behaviour. Then we accept or reject this proposed step
         using the Metropolis-Hastings algorithm which is based on the actual probability of the proposed step. This improves mixing and convergence
-
+        
         INPUTS:
         x: current sample
         S: is the sampled spectrum
@@ -167,16 +198,15 @@ class MALA():
             else:
                 mu = x + step_size * score_x
                 cov = 2 * step_size
-                return (-0.5 * (xp - mu)**2 / cov) #.sum()
-
+                return (-0.5 * (xp - mu) ** 2 / cov)
+            
         # Calculate Langevin step #####
-
         # First determine the score of the current sample
         score = score_fn(x)
         if precond_matrix is not None:
             precond_matrix_squared = precond_matrix @ precond_matrix.T
             dx = step_size * (precond_matrix_squared @ score)
-            dx += torch.sqrt(2*step_size) * (precond_matrix @ torch.randn_like(x))
+            dx += np.sqrt(2 * step_size) * (precond_matrix @ torch.randn_like(x))
         else:
             # The step is determined by the stepsize, score, and some randomness (langevin)
             dx = step_size * score + torch.sqrt(2 * step_size) * torch.randn_like(x)
@@ -188,97 +218,146 @@ class MALA():
         if not rejection_step:
             # Plain old Langevin
             return x_new, True
-
+        
         # Metropolis-Hastings Algorithim ####
         # Compute the score including the langevin step
         score_new = score_fn(x_new)
 
         # Compute the ratio of probability of this proposed step vs the current step
-        # This probability is based on prob of x_new in terms of your target distribution + prob of x_new in terms of langevin dynamics
+        # This probability is based on prob of x_new in terms of your target distribution
+        # + prob of x_new in terms of langevin dynamics
         ratio = log_prob_fn(x_new) + q(x, x_new, score_new) - log_prob_fn(x) - q(x_new, x, score)
-
-        # Accept or reject this new step based on the pre-calculated ratio
-        # Create a tensor of zeros with the same size as 'ratio'
-        mins = torch.zeros_like(ratio).to(DEVICE)
-        log_alpha = torch.minimum(mins, ratio)
+        log_alpha = torch.minimum(torch.zeros_like(ratio), ratio)
 
         # Compare the log random values with log_alpha
         beat = torch.rand(x.shape).log().to(DEVICE)
         condition = beat <= log_alpha
-        # Use torch.where to select values based on the condition
-        result = torch.where(condition, x_new,x)
+
+        # Use torch.where to select values based on the condition.
+        # REAL DATA UPDATE - condition is [B, N], so each draw and each observation is
+        # accepted or rejected independently. This depends on log_prob_gaussian returning
+        # [B, N] rather than summing to a scalar.
+        result = torch.where(condition, x_new, x)
 
         # Return the result tensor and the condition tensor
         return result, condition
 
-    def log_prob_gaussian(self, x:torch.Tensor, S:torch.Tensor, cov:torch.Tensor) -> torch.Tensor:
-        ''' REAL DATA UPDATE - updated to pass the systemic velocity to our forward model
-        Uses the passed mask to only select from the valid pixels and filters out any NaNs or artifacts that 
-        may arise from interpolation
+    def log_prob_gaussian(self, x: torch.Tensor, S: torch.Tensor, cov: torch.Tensor) -> torch.Tensor:
         '''
-        # Log-probability for a Gaussian
-        # You have to shift the sampled spectrum by the new sampled V 
-            
-          
+        Log-probability of the observations under the model, for a proposed set
+        of velocities x. The sampled spectrum S is shifted by x through the
+        forward model and compared against the data.
+
+        INPUTS:
+        x: the proposed velocities, [B, N]
+        S: the sampled spectrum
+        cov: the per-pixel uncertainty
+
+        OUTPUTS:
+        [B, N] -- one log-probability per draw per observation
+
+        REAL DATA UPDATE - The [B, N] shape is the important part! sum(dim=-1) sums over pixels only, leaving each draw and observation separate, 
+        so mala_step accepts or rejects each one independently
+
+        REAL DATA UPDATE - the mask branch below. Real observations have NaNs and dist.Normal propagates them, 
+        so the bad pixels are replaced with safe values before the log_prob and zeroed out afterwards rather than
+        being indexed out -- which keeps the shape fixed for torch.func.grad.
+        '''
+        # REAL DATA UPDATE - Updated to take in sys_vel
         sampled_obs = forward_model(S, self.spec_wgrid, self.inst_wgrid, self.berv, x, sys_vel=self.sys_vel)
-        
-        # either use the mask
-        if self.mask is not None:
+
+        if self.mask is not None:  # for real data
+            mask_use = self.mask
+            # The mask is [1, 1, L]. Guard in case a larger leading dimension
+            # ever arrives -- only the first is wanted.
+            if mask_use.shape[0] != 1:
+                mask_use = mask_use[0:1]
+
             obs_slice = self.obs
             model_slice = sampled_obs
             cov_slice = cov
-            finite_mask = self.mask & torch.isfinite(model_slice) & torch.isfinite(cov_slice)
-        # or the trim with start and finish already computed
-        else:
+
+            # There is one model per draw but only one set of observations, so obs and cov are [1, N, L] while the model is [B, N, L]
+            if model_slice.shape[0] != obs_slice.shape[0]:
+                obs_slice = obs_slice.expand(model_slice.shape[0], -1, -1)
+                cov_slice = cov_slice.expand(model_slice.shape[0], -1, -1)
+            if mask_use.shape[0] != model_slice.shape[0]:
+                mask_use = mask_use.expand(model_slice.shape[0], -1, -1)
+
+            # Four conditions: the common range from the mask, plus interior NaNs in the data, NaN the forward model produced at its own edges, and
+            # any bad uncertainties
+            finite_mask = mask_use & torch.isfinite(obs_slice) & torch.isfinite(model_slice) & torch.isfinite(cov_slice)
+
+
+            # REAL DATA UPDATE - the bad pixels get placeholder values rather than being removed. 
+            # This was done because indexing gives a flat, variable-length array and loses the [B, N, L]
+            # shape that sum(dim=-1) and torch.func.grad both need.
+            # obs and model get 0.0 -- the value does not matter, since these pixels are zeroed out of the sum
+            # cov gets 1.0 and NOT 0.0, because dist.Normal divides by the scale and a zero there gives infinity.
+
+            safe_obs = torch.where(finite_mask, obs_slice, torch.zeros_like(obs_slice))
+            safe_model = torch.where(finite_mask, model_slice, torch.zeros_like(model_slice))
+            safe_cov = torch.where(finite_mask, cov_slice, torch.ones_like(cov_slice))
+
+            norm = dist.Normal(safe_obs, safe_cov)
+            pdf_values = norm.log_prob(safe_model)
+            pdf_values = torch.where(finite_mask, pdf_values, torch.zeros_like(pdf_values))
+            return pdf_values.sum(dim=-1)
+        
+        else:  #synthetic data, no NaN handling required
             obs_slice = self.obs[:, :, self.start:self.end]
             model_slice = sampled_obs[:, :, self.start:self.end]
             cov_slice = cov[:, :, self.start:self.end]
-            finite_mask = torch.isfinite(obs_slice) & torch.isfinite(model_slice) & torch.isfinite(cov_slice)
+            norm = dist.Normal(obs_slice, cov_slice)
+            pdf_values = norm.log_prob(model_slice)
+            return pdf_values.sum(dim=-1)
 
-        # extract only the valid pixels
-        obs_finite = obs_slice[finite_mask]
-        model_finite = model_slice[finite_mask]
-        cov_finite = cov_slice[finite_mask]
-
-        # Compare this with the observations
-        norm = dist.Normal(obs_finite, cov_finite)
-        pdf_values = norm.log_prob(model_finite)
-        return pdf_values.sum()
-
-    def log_prob_gaussian_for_score(self, x: torch.Tensor, S: torch.Tensor, cov: torch.Tensor) -> torch.Tensor:        
-        ''' REAL DATA UPDATE - updated to pass the systemic velocity to our forward model
-        Uses the passed mask to only select from the valid pixels and filters out any NaNs or artifacts that 
-        may arise from interpolation
+    def log_prob_gaussian_for_score(self, x: torch.Tensor, S: torch.Tensor, cov: torch.Tensor) -> torch.Tensor:
         '''
-        # Log-probability for a Gaussian
-        # You have to shift the sampled spectrum by the new sampled V 
-        
+        REAL DATA UPDATE - kept SEPARATE from log_prob_gaussian on purpose: torch.func.grad
+        requires a SCALAR-valued function, but log_prob_gaussian above returns [B,N]. This sums
+        over EVERYTHING into one number, used only for the gradient in score_gaussian below.
+        '''
         sampled_obs = forward_model(S, self.spec_wgrid, self.inst_wgrid, self.berv, x, sys_vel=self.sys_vel)
 
-        # either use the mask
-        if self.mask is not None:
+        if self.mask is not None:  # real data
+            # See log_prob_gaussian for what all of this does - it is the same 
+            mask_use = self.mask
+            if mask_use.shape[0] != 1:
+                mask_use = mask_use[0:1]
+
             obs_slice = self.obs
             model_slice = sampled_obs
             cov_slice = cov
-            finite_mask = self.mask & torch.isfinite(model_slice) & torch.isfinite(cov_slice)
-        # or the trim with start and finish already computed
-        else:
+            if model_slice.shape[0] != obs_slice.shape[0]:
+                obs_slice = obs_slice.expand(model_slice.shape[0], -1, -1)
+                cov_slice = cov_slice.expand(model_slice.shape[0], -1, -1)
+            if mask_use.shape[0] != model_slice.shape[0]:
+                mask_use = mask_use.expand(model_slice.shape[0], -1, -1)
+
+            finite_mask = mask_use & torch.isfinite(obs_slice) & torch.isfinite(model_slice) & torch.isfinite(cov_slice)
+
+            # Placeholders for the bad pixels
+            safe_obs = torch.where(finite_mask, obs_slice, torch.zeros_like(obs_slice))
+            safe_model = torch.where(finite_mask, model_slice, torch.zeros_like(model_slice))
+            safe_cov = torch.where(finite_mask, cov_slice, torch.ones_like(cov_slice))
+
+            norm = dist.Normal(safe_obs, safe_cov)
+            pdf_values = norm.log_prob(safe_model)
+            pdf_values = torch.where(finite_mask, pdf_values, torch.zeros_like(pdf_values))
+
+            # sum() over everything, unlike sum(dim=-1) in log_prob_gaussian --
+            # torch.func.grad needs a scalar
+            return pdf_values.sum()
+        else:  #synthetic data
             obs_slice = self.obs[:, :, self.start:self.end]
             model_slice = sampled_obs[:, :, self.start:self.end]
             cov_slice = cov[:, :, self.start:self.end]
-            finite_mask = torch.isfinite(obs_slice) & torch.isfinite(model_slice) & torch.isfinite(cov_slice)
-
-        # extract only the valid pixels
-        obs_finite = obs_slice[finite_mask]
-        model_finite = model_slice[finite_mask]
-        cov_finite = cov_slice[finite_mask]
-
-        # Compare this with the observations
-        norm = dist.Normal(obs_finite, cov_finite)
-        pdf_values = norm.log_prob(model_finite)
-        return pdf_values.sum()
+            norm = dist.Normal(obs_slice, cov_slice)
+            pdf_values = norm.log_prob(model_slice)
+            return pdf_values.sum()
 
     def score_gaussian(self, x, mu, cov):
         # Gradient of log-probability for a Gaussian
-        scr = grad(self.log_prob_gaussian_for_score, argnums=0)(x,mu,cov)
+        scr = grad(self.log_prob_gaussian_for_score, argnums=0)(x, mu, cov)
         return scr
