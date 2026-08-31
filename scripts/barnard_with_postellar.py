@@ -221,14 +221,14 @@ for i in range(nspec):
         return forward_model(spec, phoenix_wgrid_torch, native_wgrid, berv_for_A, planetrv_for_A, sys_vel=sys_for_A)
 
     A_full = jacobian(f_wrapped, x_ref, create_graph=False)
-    A = A_full[0, 0, :, 0, 0, :]                      # [L_obs, L_phoenix]
-    chunk_AtA = torch.matmul(A, A.transpose(-1, -2))  # [L_obs, L_obs]
+    A = A_full[0, :, :, 0, 0, :] 
+    chunk_AtA = torch.matmul(A, A.transpose(-1, -2))  # [1, L_obs, L_obs]
     list_AtA.append(chunk_AtA)
 
     del A_full, A, chunk_AtA
     torch.cuda.empty_cache()
 
-AtA_full = torch.stack(list_AtA, dim=0)               # [N, L_obs, L_obs]
+AtA_full = torch.cat(list_AtA, dim=0)               # [N, L_obs, L_obs]
 print(f"AtA_full shape: {AtA_full.shape}")
 torch.save(AtA_full, f'ata_matrix_order_{order}.pt')
 
@@ -327,7 +327,7 @@ rest_left_edges, rest_right_edges = [], []
 for i in range(nspec):
     w_i = wavelengths_2d[i].cpu().numpy()
     shift_i = obs_berv[i].item() - sys_values[i].item()  # explicit raw berv minus sys_vel, per observation
-    ratio = np.sqrt((1 - shift_i/c_val) / (1 + shift_i/c_val))
+    ratio = np.sqrt((1 + shift_i/c_val) / (1 - shift_i/c_val))
     rest_left_edges.append(w_i[common_left] * ratio)
     rest_right_edges.append(w_i[common_right] * ratio)
 
@@ -342,7 +342,7 @@ post_right = np.searchsorted(phoenix_wgrid_np, rest_right_nm)
 # In these observations, there are often more bad pixels on the left than the right. 
 # To account for this, I have decided to perform an asymmetric trim and replace more of the left region with NaNs rather than trimming symmetrically
 # This step may or may not be correct. I added this in as the common_left and common_right did not seem to be capturing the non-constrained edges of the posteriors
-post_trim_left = 0.05
+post_trim_left = 0.02
 post_trim_right = 0.02
 
 post_width = post_right - post_left   
