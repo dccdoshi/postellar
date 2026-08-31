@@ -124,8 +124,7 @@ def Score_Likelihood(Y: torch.Tensor,V: torch.Tensor,sig_n: torch.Tensor,berv, s
 
         #### Transform the diffusion model output ####
         # REAL DATA UPDATE - forward_model needs to take sys_vel and obs_wgrids
-        transformed_X = forward_model(x_unpad,spec_wgrid,inst_wgrid,berv,V,sys_vel,
-                                      obs_wgrids=obs_wgrids)
+        transformed_X = forward_model(x_unpad,spec_wgrid,inst_wgrid,berv,V,sys_vel,obs_wgrids=obs_wgrids)
 
         # Calculate likelihood with transformed x
         llk = cholesky_fast(Y,mu,transformed_X,Sigma)
